@@ -1,0 +1,56 @@
+# Copyright (c) 2026 Aldianokto
+# Distributed under the Apache License, see the accompanying
+# file LICENSE or https://www.apache.org/licenses/LICENSE-2.0.
+
+# Rust build artifacts
+/target/
+target/
+
+# Compiled binaries copied to the repository root by build.sh or Makefile
+/xepay
+/xepayd
+/xepay-miner
+/xepay-genesis
+
+# Gitian build directories
+/contrib/gitian-builder/
+/contrib/gitian-keys/*.private
+/contrib/gitian-keys/*.asc
+
+# Packaging and artifact directories
+/dist/
+/package/
+/artifact/
+
+# Release archives
+/*.tar.gz
+/*.zip
+
+# Code coverage output
+*.profraw
+*.profdata
+/coverage/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+wallet.dat
+xepay.conf
+peers.json
+mempool.json
+/chainstate/
+/blocks/
+.xepay/
+
+# Editor and operating system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Log files
+*.log

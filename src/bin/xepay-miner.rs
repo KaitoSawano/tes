@@ -1,0 +1,121 @@
+// Copyright (c) 2026 Aldianokto
+// Distributed under the Apache License, see the accompanying
+// file LICENSE or https://www.apache.org/licenses/LICENSE-2.0.
+
+//! XEPAY standalone miner.
+//!
+//! This binary requests a block template from the node, mines the block,
+//! and submits it back to the node through the RPC interface.
+
+use xepay::block::Block;
+use xepay::rpc;
+use xepay::transaction::Transaction;
+
+fn main() {
+    println!("[miner] xepay-miner started");
+    println!(
+        "[miner] connecting to the node at {}",
+        rpc::DEFAULT_RPC_ADDR
+    );
+
+    let target_address =
+        std::env::var("XEPC_MINE_FOR").unwrap_or_else(|_| "UNKNOWN".to_string());
+
+    if target_address == "UNKNOWN" {
+        println!("[miner] XEPC_MINE_FOR is not set. Set it to a valid XEPAY address.");
+        return;
+    }
+
+    loop {
+        let template = match rpc::call("getblocktemplate", vec![serde_json::json!(target_address)]) {
+            Ok(r) if r.ok => r.result,
+            Ok(r) => {
+                println!("[miner] node rejected the request: {}", r.error);
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
+            Err(e) => {
+                println!("[miner] cannot reach the node: {}", e);
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
+        };
+
+        let height = template["height"].as_u64().unwrap_or(0);
+        let previous_hash = template["previous_hash"].as_str().unwrap_or("").to_string();
+        let previous_chainwork = template["previous_chainwork"]
+            .as_str()
+            .unwrap_or("0")
+            .parse::<u128>()
+            .unwrap_or(0);
+        let nbits = match template["nbits"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+        {
+            Some(v) => v,
+            None => {
+                println!("[miner] invalid nbits in template");
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
+        };
+
+        let subsidy_ald = template["subsidy_ald"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+        let total_fees_ald = template["total_fees_ald"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+        let reward_ald = template["reward_ald"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+
+        let mempool: Vec<Transaction> =
+            serde_json::from_value(template["mempool"].clone()).unwrap_or_default();
+
+        let mut block = match Block::new_for(
+            height,
+            previous_hash,
+            subsidy_ald,
+            total_fees_ald,
+            nbits,
+            mempool,
+            target_address.clone(),
+            previous_chainwork,
+        ) {
+            Ok(b) => b.with_state_root(
+                template["state_root"].as_str().unwrap_or("").to_string(),
+            ),
+            Err(e) => {
+                println!("[miner] failed to create block: {}", e);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                continue;
+            }
+        };
+
+        if block.reward != reward_ald {
+            println!(
+                "[miner] WARNING: reward mismatch. Block reward: {}, Template reward: {}",
+                block.reward, reward_ald
+            );
+        }
+
+        if !xepay::pow::mine(&mut block, nbits) {
+            println!("[miner] mining failed: nonce exhausted");
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
+        }
+
+        let block_json = serde_json::to_value(&block).unwrap();
+        match rpc::call("submitblock", vec![block_json]) {
+            Ok(r) if r.ok => {
+                println!(
+                    "[miner] block accepted: {}",
+                    serde_json::to_string(&r.result).unwrap()
+                );
+            }
+            Ok(r) => {
+                println!("[miner] block rejected: {}", r.error);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            Err(e) => {
+                println!("[miner] submission failed: {}", e);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+    }
+}
