@@ -184,34 +184,95 @@ pub const MEMPOOL_MAX_TXS: usize = rules::MAX_TX_PER_BLOCK * 20;
 pub const MEMPOOL_EXPIRY_SECS: u64 = 336 * 3600;
 pub const RBF_MIN_FEE_BUMP_PERCENT: u64 = 10;
 
+/// Hard-coded checkpoints (height -> block hash), one list per network.
+///
+/// What they do:
+/// * a block (or header) at a checkpoint height with a different hash is
+///   rejected (`rule_block_checkpoint`, header validation);
+/// * the chain can never be reorganized below the highest checkpoint that
+///   is already part of the active chain (`reorg_allowed`);
+/// * peers cannot feed a node a fake long history that conflicts with them.
+///
+/// How to add one: on a synced node run `xepay getcheckpoint` and paste the
+/// printed line into the list of the right network. Use a block that is deep
+/// enough (hundreds of blocks) that it can never be reorganized.
 pub mod checkpoint {
+    use crate::consensus::spec::{self, Network};
+
+    /// One trusted (height, hash) pair.
     pub struct Checkpoint {
         pub height: u64,
         pub hash: &'static str,
     }
 
-    pub const CHECKPOINTS: &[Checkpoint] = &[Checkpoint {
-        height: 0,
-        hash: "0000000000000000000000000000000000000000000000000000000000000000",
-    }];
+    /// Mainnet checkpoints (the genesis block is verified separately).
+    pub const MAIN_CHECKPOINTS: &[Checkpoint] = &[];
+    /// Testnet checkpoints.
+    pub const TEST_CHECKPOINTS: &[Checkpoint] = &[];
+    /// Regtest checkpoints (none: regtest chains are disposable).
+    pub const REGTEST_CHECKPOINTS: &[Checkpoint] = &[];
 
+    /// Checkpoints of the running network.
+    pub fn list() -> &'static [Checkpoint] {
+        match spec::current_network() {
+            Network::Main => MAIN_CHECKPOINTS,
+            Network::Test => TEST_CHECKPOINTS,
+            Network::Regtest => REGTEST_CHECKPOINTS,
+        }
+    }
+
+    /// Hash expected at `height`, if a checkpoint exists there.
     pub fn find(height: u64) -> Option<&'static str> {
-        CHECKPOINTS.iter().find(|c| c.height == height).map(|c| c.hash)
+        list().iter().find(|c| c.height == height).map(|c| c.hash)
     }
 
+    /// True when a checkpoint exists at `height`.
     pub fn is_checkpoint(height: u64) -> bool {
-        CHECKPOINTS.iter().any(|c| c.height == height)
+        list().iter().any(|c| c.height == height)
     }
 
+    /// Height of the highest checkpoint (0 when there is none).
     pub fn highest() -> u64 {
-        CHECKPOINTS.iter().map(|c| c.height).max().unwrap_or(0)
+        list().iter().map(|c| c.height).max().unwrap_or(0)
     }
 
-    pub fn verify(height: u64, hash: &str) -> bool {
-        match find(height) {
-            Some(expected) => expected == hash,
+    /// False when a checkpoint at `height` in `list` expects a different hash.
+    pub fn verify_in(list: &[Checkpoint], height: u64, hash: &str) -> bool {
+        match list.iter().find(|c| c.height == height) {
+            Some(c) => c.hash.eq_ignore_ascii_case(hash),
             None => true,
         }
+    }
+
+    /// False when a checkpoint of this network expects a different hash.
+    pub fn verify(height: u64, hash: &str) -> bool {
+        verify_in(list(), height, hash)
+    }
+
+    /// Highest checkpoint height in `list` at or below `tip_height`
+    /// (0 when none): blocks up to there are final.
+    pub fn locked_height_in(list: &[Checkpoint], tip_height: u64) -> u64 {
+        list.iter()
+            .map(|c| c.height)
+            .filter(|h| *h <= tip_height)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Same as `locked_height_in` for the checkpoints of this network.
+    pub fn locked_height(tip_height: u64) -> u64 {
+        locked_height_in(list(), tip_height)
+    }
+
+    /// A reorganization that keeps blocks up to `fork_point` (the common
+    /// ancestor) is allowed only if it does not replace a checkpointed block.
+    pub fn reorg_allowed_in(list: &[Checkpoint], fork_point: u64, tip_height: u64) -> bool {
+        fork_point >= locked_height_in(list, tip_height)
+    }
+
+    /// Same as `reorg_allowed_in` for the checkpoints of this network.
+    pub fn reorg_allowed(fork_point: u64, tip_height: u64) -> bool {
+        reorg_allowed_in(list(), fork_point, tip_height)
     }
 }
 
@@ -987,67 +1048,62 @@ impl Blockchain {
         Ok(nonce)
     }
 
-    /// Difficulty after the retarget at `height`, starting from `current`.
-    fn retarget_at(&self, height: u64, current: u32) -> u32 {
-        let interval = spec::DIFFICULTY_ADJUST_INTERVAL as usize;
-        let h = height as usize;
-        if h < interval || h >= self.chain.len() {
-            return current; // not enough history (or not loaded): keep
+    /// Difficulty after the retarget at `height`: measures the time the last
+    /// `interval` blocks took (median-time-past at both ends, so single
+    /// timestamps cannot skew it) and applies `compute_retarget`.
+    fn retarget_window(&self, height: u64, interval: u64, timespan: u64, current: u32) -> u32 {
+        let h = height as usize; // index of the last block of the window
+        let n = interval as usize; // window length in blocks
+        if h < n || h >= self.chain.len() {
+            return current; // not enough history loaded
         }
-        let last_mtp = self.median_time_past_at(h);
-        let first_mtp = self.median_time_past_at(h - interval);
-        let actual_time_secs = last_mtp.saturating_sub(first_mtp) as u64;
-        if actual_time_secs == 0 {
-            return current;
-        }
-        let current_target = pow::nbits_to_target(current);
-        let mut scale = (actual_time_secs as u128)
-            .checked_mul(256)
-            .unwrap_or(u128::MAX)
-            / (spec::POW_TARGET_TIMESPAN_SECS as u128);
-        if scale < 64 {
-            scale = 64;
-        }
-        if scale > 1024 {
-            scale = 1024;
-        }
-        target_to_nbits(&scale_target(&current_target, scale))
+        let last_mtp = self.median_time_past_at(h); // time at the end of the window
+        let first_mtp = self.median_time_past_at(h - n); // time at its start
+        let actual = last_mtp.saturating_sub(first_mtp) as u64;
+        compute_retarget(current, actual, timespan)
     }
 
-    /// Recompute `self.nbits` from the chain. It is idempotent: the result
-    /// depends only on the blocks, so it is also right after a restart or a
-    /// reorg. Events, in height order: a retarget after every multiple of
-    /// the interval, and the restart at the first Xephash block.
+    /// Recompute `self.nbits` purely from the chain (idempotent): correct
+    /// after every block, after a restart and after a reorg.
+    ///
+    /// * Before the Xephash activation: legacy schedule (long interval).
+    /// * From the activation: the difficulty restarts at
+    ///   `rules::xephash_start_nbits()` and is retargeted every 15 hours
+    ///   (`RETARGET_INTERVAL_BLOCKS_V2` blocks, counted from the activation).
     pub fn adjust_difficulty(&mut self) {
         let net = spec::current_network();
-        let mut nbits = net.genesis_nbits();
+        let genesis_nbits = net.genesis_nbits();
         if net == spec::Network::Regtest {
-            self.nbits = nbits; // regtest never retargets
+            self.nbits = genesis_nbits; // regtest never retargets
             return;
         }
         let tip = self.height();
-        let interval = spec::DIFFICULTY_ADJUST_INTERVAL;
-        // After this block is connected the next one is the first Xephash block.
-        let reset_at = rules::xephash_activation_height().saturating_sub(1);
-        let mut reset_done = false;
-        let mut h = interval;
-        while h <= tip {
-            if !reset_done && reset_at < h {
-                nbits = rules::xephash_start_nbits();
-                reset_done = true;
+        let activation = rules::xephash_activation_height();
+        let mut nbits;
+        if tip.saturating_add(1) < activation {
+            // Legacy schedule.
+            nbits = genesis_nbits;
+            let interval = spec::DIFFICULTY_ADJUST_INTERVAL;
+            let mut h = interval;
+            while h <= tip {
+                nbits = self.retarget_window(h, interval, spec::POW_TARGET_TIMESPAN_SECS, nbits);
+                h = match h.checked_add(interval) {
+                    Some(v) => v,
+                    None => break,
+                };
             }
-            nbits = self.retarget_at(h, nbits);
-            if !reset_done && reset_at == h {
-                nbits = rules::xephash_start_nbits();
-                reset_done = true;
-            }
-            h = match h.checked_add(interval) {
-                Some(v) => v,
-                None => break,
-            };
-        }
-        if !reset_done && reset_at <= tip {
+        } else {
+            // Xephash schedule: restart, then one retarget every 15 hours.
             nbits = rules::xephash_start_nbits();
+            let interval = spec::RETARGET_INTERVAL_BLOCKS_V2;
+            let mut h = activation.saturating_add(interval);
+            while h <= tip {
+                nbits = self.retarget_window(h, interval, spec::RETARGET_TIMESPAN_SECS_V2, nbits);
+                h = match h.checked_add(interval) {
+                    Some(v) => v,
+                    None => break,
+                };
+            }
         }
         self.nbits = nbits;
     }
@@ -1078,21 +1134,57 @@ impl Default for Blockchain {
     }
 }
 
+/// Compute `target * scale_256 / 256`, saturating at 2^256 - 1.
+/// (`scale_256` is a fixed-point ratio: 256 means "unchanged".)
 pub(crate) fn scale_target(target: &[u8; 32], scale_256: u128) -> [u8; 32] {
-    let mut result = [0u8; 32];
-    let mut carry: u128 = 0;
-
+    let mut prod = [0u8; 32]; // low 256 bits of target * scale_256
+    let mut carry: u128 = 0; // bits above 2^256
     for i in (0..32).rev() {
+        // One byte at a time, least significant byte first (big-endian array).
         let v = (target[i] as u128)
-            .checked_mul(scale_256)
-            .unwrap_or(u128::MAX)
-            .checked_add(carry)
-            .unwrap_or(u128::MAX);
-
-        result[i] = (v & 0xff) as u8;
+            .saturating_mul(scale_256)
+            .saturating_add(carry);
+        prod[i] = (v & 0xff) as u8;
         carry = v >> 8;
     }
-    result
+    // Dividing by 256 drops the lowest byte and moves the carry into the top byte.
+    if carry >> 8 != 0 {
+        return [0xff; 32]; // does not fit in 256 bits after the shift
+    }
+    let mut out = [0u8; 32];
+    out[0] = carry as u8; // bits 248..255 of the result
+    out[1..].copy_from_slice(&prod[..31]); // the remaining 31 bytes
+    out
+}
+
+/// The proof-of-work limit (easiest allowed target) as 32 bytes.
+fn pow_limit_bytes() -> [u8; 32] {
+    let mut out = [0xffu8; 32]; // fallback: no limit
+    if let Ok(b) = hex::decode(cpow::pow_limit()) {
+        if b.len() == 32 {
+            out.copy_from_slice(&b);
+        }
+    }
+    out
+}
+
+/// Pure retarget rule: the new compact difficulty after a window that took
+/// `actual_secs` while `expected_secs` were intended. The change is clamped
+/// to 0.25x .. 4x per window and never easier than the proof-of-work limit.
+pub fn compute_retarget(current_nbits: u32, actual_secs: u64, expected_secs: u64) -> u32 {
+    if actual_secs == 0 || expected_secs == 0 {
+        return current_nbits; // no usable measurement: keep the difficulty
+    }
+    // Fixed point ratio (256 = on schedule), clamped to 64..=1024 (0.25x..4x).
+    let ratio = (actual_secs as u128).saturating_mul(256) / expected_secs as u128;
+    let ratio = ratio.clamp(64, 1024);
+    let current_target = pow::nbits_to_target(current_nbits); // target of the old nbits
+    let mut new_target = scale_target(&current_target, ratio); // slow blocks => bigger target
+    let limit = pow_limit_bytes();
+    if new_target.as_slice() > limit.as_slice() {
+        new_target = limit; // never easier than the limit
+    }
+    target_to_nbits(&new_target)
 }
 
 fn target_to_nbits(target: &[u8; 32]) -> u32 {

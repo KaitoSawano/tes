@@ -116,5 +116,31 @@ pub fn xephash_start_nbits() -> u32 {
     crate::consensus::spec::current_network().genesis_nbits()
 }
 
+/// True when the difficulty is recomputed right AFTER the block at `height`
+/// is connected (so block `height + 1` may carry a new `nbits`).
+/// Before the Xephash activation the legacy schedule applies; from it, the
+/// difficulty restarts and is retargeted every `RETARGET_INTERVAL_BLOCKS_V2`.
+pub fn retarget_after(height: u64) -> bool {
+    use crate::consensus::spec::{self, Network};
+    if spec::current_network() == Network::Regtest || height == 0 {
+        return false; // regtest never retargets
+    }
+    let activation = xephash_activation_height();
+    if height >= activation {
+        height > activation && (height - activation) % spec::RETARGET_INTERVAL_BLOCKS_V2 == 0
+    } else {
+        height % spec::DIFFICULTY_ADJUST_INTERVAL == 0
+    }
+}
+
+/// True when block `height + 1` may legitimately have a different `nbits`
+/// than block `height` (a retarget, or the Xephash difficulty restart).
+pub fn nbits_may_change_after(height: u64) -> bool {
+    use crate::consensus::spec::{self, Network};
+    retarget_after(height)
+        || (spec::current_network() != Network::Regtest
+            && height.saturating_add(1) == xephash_activation_height())
+}
+
 /// Number of blocks for which undo data is kept in the state database.
 pub const UNDO_RETENTION: u64 = 1_000;

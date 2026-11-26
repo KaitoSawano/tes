@@ -36,3 +36,30 @@ full dataset (Main: 128 MiB) once per epoch.
   every node upgrade before that height. Tune `xephash_start_nbits()` first.
 
 Parameters live in `crypto/src/xephash.rs` (`Params::MAIN`, `TEST`, `REGTEST`).
+
+## Difficulty (15 hour retarget)
+
+From the Xephash activation the difficulty restarts at `rules::xephash_start_nbits()`
+and is retargeted every 3600 blocks (15 hours at 15 s blocks), counted from the
+activation block. The measured time of a window uses the median-time-past of its
+first and last block. The change per window is clamped to 0.25x .. 4x and the
+target never exceeds the proof-of-work limit. `Blockchain::adjust_difficulty`
+recomputes the value from the chain, so it survives restarts and reorgs.
+
+## Checkpoints
+
+`blockchain::checkpoint` holds one list per network (empty by default). A
+checkpoint rejects any block or header with a different hash at that height and
+forbids reorganizations below the highest checkpoint already in the chain.
+Add entries with `xepay getcheckpoint [height]` (prints the Rust line to paste).
+
+## Tools for the community
+
+```text
+cargo run -p xepay-crypto --release --bin xephash -- vectors
+cargo run -p xepay-crypto --release --bin xephash -- bench main 10
+cargo run -p xepay-crypto --release --bin xephash -- hash main 60000 <header_hex> <nonce>
+```
+
+`vectors` prints the reference values that every independent implementation must
+reproduce, `bench` measures cache/dataset build time and the light/full hash rate.

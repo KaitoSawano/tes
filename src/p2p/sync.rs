@@ -33,7 +33,6 @@ use std::time::{Duration, Instant};
 
 use crate::block::Block;
 use crate::blockchain::Blockchain;
-use crate::consensus::spec::DIFFICULTY_ADJUST_INTERVAL;
 use crate::storage::{self, BlockStatus};
 use crate::validation;
 
@@ -661,6 +660,15 @@ impl SyncState {
             return Err("reorg block does not extend the ancestor".into());
         }
 
+        // Checkpoints are final: never replace a checkpointed block.
+        if !crate::blockchain::checkpoint::reorg_allowed(ancestor_index, chain.height()) {
+            return Err(format!(
+                "reorg rejected: fork point {} is below the checkpoint at height {}",
+                ancestor_index,
+                crate::blockchain::checkpoint::locked_height(chain.height())
+            ));
+        }
+
         let original_len = chain.chain.len();
         let rollback_blocks: Vec<Block> = if ancestor_index + 1 < original_len as u64 {
             chain.chain[(ancestor_index + 1) as usize..].to_vec()
@@ -772,7 +780,7 @@ fn validate_block_structural(
     // applying the adjustment to the view ending at the parent, which
     // is not available here. Reject the block instead of accepting an
     // unverified nbits.
-    if parent.index != 0 && parent.index % DIFFICULTY_ADJUST_INTERVAL == 0 {
+    if crate::consensus::rules::nbits_may_change_after(parent.index) {
         return Err(validation::ValidationError::new(
             "E901",
             format!(
@@ -1032,6 +1040,15 @@ fn reorganize(chain: &mut Blockchain, sync_state: &mut SyncState) -> Result<(), 
         .find(|b| b.hash == ancestor_hash)
         .cloned()
         .ok_or_else(|| "reorganize: ancestor block not found".to_string())?;
+
+    // Checkpoints are final: never replace a checkpointed block.
+    if !crate::blockchain::checkpoint::reorg_allowed(ancestor_block.index, chain.height()) {
+        return Err(format!(
+            "reorganize: fork point {} is below the checkpoint at height {}",
+            ancestor_block.index,
+            crate::blockchain::checkpoint::locked_height(chain.height())
+        ));
+    }
 
     let original_chain = chain.chain.clone();
 

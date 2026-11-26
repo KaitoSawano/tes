@@ -171,6 +171,11 @@ pub const MAX_ERAS: u32 = 200;
 // POW_TARGET_TIMESPAN_SECS because the latter depends on the former.
 pub const DIFFICULTY_ADJUST_INTERVAL: u64 = 69_120;
 pub const POW_TARGET_SPACING_SECS: u64 = 15;
+
+/// From the Xephash activation the difficulty is re-evaluated every 15 hours.
+pub const RETARGET_TIMESPAN_SECS_V2: u64 = 15 * 3600;
+/// Blocks per retarget window at the 15 second target spacing (3600 blocks).
+pub const RETARGET_INTERVAL_BLOCKS_V2: u64 = RETARGET_TIMESPAN_SECS_V2 / POW_TARGET_SPACING_SECS;
 pub const POW_TARGET_TIMESPAN_SECS: u64 =
     DIFFICULTY_ADJUST_INTERVAL * POW_TARGET_SPACING_SECS;
 pub const MINER_CONFIRMATION_WINDOW: u64 = 69_120;

@@ -67,6 +67,7 @@ fn main() {
         let mempool: Vec<Transaction> =
             serde_json::from_value(template["mempool"].clone()).unwrap_or_default();
 
+        let block_previous_hash = previous_hash.clone(); // for the tip watcher below
         let mut block = match Block::new_for(
             height,
             previous_hash,
@@ -94,9 +95,38 @@ fn main() {
             );
         }
 
-        if !xepay::pow::mine(&mut block, nbits) {
-            println!("[miner] mining failed: nonce exhausted");
-            std::thread::sleep(std::time::Duration::from_secs(1));
+        // Mine in a helper thread; this thread watches the node and stops the
+        // work as soon as the chain tip changes (somebody else found a block),
+        // so no hash power is wasted on a stale block.
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mined = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let ok = xepay::pow::mine_interruptible(&mut block, nbits, Some(&stop));
+                stop.store(true, std::sync::atomic::Ordering::SeqCst); // tell the watcher we are done
+                ok
+            });
+            let mut waited = 0u32;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                waited += 1;
+                if waited % 2 == 0 {
+                    // Every second: has the tip moved? (cheap read-only call)
+                    if let Ok(r) = rpc::call("getbestblockhash", vec![]) {
+                        if r.ok {
+                            let tip = r.result.as_str().unwrap_or("");
+                            if !tip.is_empty() && tip != block_previous_hash.as_str() {
+                                println!("[miner] chain tip changed; restarting with new work");
+                                stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                    }
+                }
+            }
+            worker.join().unwrap_or(false)
+        });
+        if !mined {
+            // Interrupted (new tip) or nonce space exhausted: fetch fresh work.
+            std::thread::sleep(std::time::Duration::from_millis(200));
             continue;
         }
 

@@ -71,3 +71,9 @@ key; the node stores it in the state (part of the state root, undone with the
 block on a reorg). Later transactions of that address leave the key out and are
 verified with the registered key. The signing hash does not cover the key, so
 signatures are unchanged. A transaction that still carries the key is valid.
+
+## Proof of work and difficulty
+
+From the Xephash activation height the proof of work is Xephash (see `XEPHASH.md`),
+the difficulty restarts and is retargeted every 15 hours (3600 blocks), clamped to
+0.25x .. 4x per window. This is part of the same hard fork as the state root.

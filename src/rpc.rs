@@ -386,6 +386,7 @@ impl RpcHandler {
             "getnetworkinfo" => self.m_getnetworkinfo(),
             "getpeerinfo" => self.m_getpeerinfo(),
             "getcheckpoints" => m_getcheckpoints(),
+            "getcheckpoint" => self.m_getcheckpoint(req),
             "getblocktemplate" => self.m_getblocktemplate(req),
             "submitblock" => self.m_submitblock(req),
             "getbalance" => self.m_getbalance(req),
@@ -533,7 +534,7 @@ impl RpcHandler {
             "mempool_len": c.mempool.len(),
             "mempool_size_bytes": c.mempool_size_bytes(),
             "min_relay_fee_per_byte": blockchain::MIN_RELAY_FEE_PER_BYTE,
-            "checkpoints_count": blockchain::checkpoint::CHECKPOINTS.len(),
+            "checkpoints_count": blockchain::checkpoint::list().len(),
             "checkpoints_highest": blockchain::checkpoint::highest(),
             "consensus_fingerprint": self.state.fingerprint(),
             "datadir": datadir::as_str(&datadir::datadir()),
@@ -603,7 +604,7 @@ impl RpcHandler {
             "verificationprogress": 1.0,
             "initialblockdownload": false,
             "pruned": false,
-            "checkpoints_count": blockchain::checkpoint::CHECKPOINTS.len(),
+            "checkpoints_count": blockchain::checkpoint::list().len(),
             "checkpoints_highest": blockchain::checkpoint::highest(),
             "mempool_len": c.mempool.len(),
             "mempool_size_bytes": c.mempool_size_bytes(),
@@ -1060,7 +1061,7 @@ impl RpcHandler {
                 "nbits": format!("{:#010x}", chain.nbits),
                 "pow_limit": consensus::pow_limit(),
                 "signature_algo": consensus::signature_algo(),
-                "checkpoints_count": blockchain::checkpoint::CHECKPOINTS.len(),
+                "checkpoints_count": blockchain::checkpoint::list().len(),
                 "consensus_fingerprint": self.state.fingerprint(),
             })),
             Err(e) => RpcResponse::ok(json!({
@@ -2030,8 +2031,35 @@ impl RpcHandler {
     }
 }
 
+impl RpcServer {
+    /// Print a checkpoint line for a deep block of the active chain, ready to
+    /// paste into `blockchain::checkpoint` (default: 1000 blocks below the tip).
+    fn m_getcheckpoint(&self, req: &RpcRequest) -> RpcResponse {
+        let chain = self.state.chain.blocking_read();
+        let tip = chain.height();
+        let height = req
+            .params
+            .first()
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(|| tip.saturating_sub(1000));
+        if height == 0 || height > tip {
+            return RpcResponse::err("height must be between 1 and the chain tip");
+        }
+        match chain.chain.get(height as usize) {
+            Some(b) => RpcResponse::ok(json!({
+                "height": b.index,
+                "hash": b.hash,
+                "rust_line": format!("Checkpoint {{ height: {}, hash: \"{}\" }},", b.index, b.hash),
+                "confirmations": tip - b.index,
+                "hint": "paste the line into the checkpoint list of this network in src/blockchain.rs",
+            })),
+            None => RpcResponse::err("block not found"),
+        }
+    }
+}
+
 fn m_getcheckpoints() -> RpcResponse {
-    let items: Vec<Value> = blockchain::checkpoint::CHECKPOINTS
+    let items: Vec<Value> = blockchain::checkpoint::list()
         .iter()
         .map(|c| json!({"height": c.height, "hash": c.hash}))
         .collect();

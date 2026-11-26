@@ -195,8 +195,12 @@ pub fn block_meets_pow(block: &Block) -> bool {
     }
 }
 
-/// Mine with Xephash. `use_full` builds the full dataset (fast, needs RAM);
-/// if that fails, or `use_full` is false, the slower light mode is used.
+/// Mine with Xephash using every CPU core.
+///
+/// `use_full` builds the full dataset (fast, needs RAM); if that fails, or
+/// `use_full` is false, the slower light mode is used. The nonce space is
+/// split between threads (thread `t` tries `start + t`, `start + t + T`, ...),
+/// the first solution wins, `interrupt` stops everything.
 pub fn mine_xephash(
     block: &mut Block,
     nbits: u32,
@@ -215,10 +219,11 @@ pub fn mine_xephash(
         }
     };
     let seal = block.seal_hash(); // fixed for all nonces
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 64);
     let dataset = if use_full {
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
         match engine.full_dataset(block.index, threads) {
             Ok(d) => Some(d),
             Err(e) => {
@@ -229,29 +234,68 @@ pub fn mine_xephash(
     } else {
         None
     };
-    loop {
-        if let Some(flag) = interrupt {
-            if flag.load(Ordering::SeqCst) {
-                return false; // stop requested
-            }
-        }
-        let out = match &dataset {
-            Some(d) => xepay_crypto::xephash::hashimoto_full(d, &seal, block.nonce),
-            None => engine.verify(block.index, &seal, block.nonce),
-        };
-        match out {
-            Ok(o) => {
-                if xepay_crypto::xephash::meets_target(&o.result, &target) {
-                    block.hash = block.calculate_hash(); // block id with the winning nonce
-                    return true;
+
+    let found = AtomicBool::new(false); // set when a thread finds a solution (or fails)
+    let winner: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+    let start = block.nonce; // first nonce to try
+    let index = block.index;
+    let step = threads as u64; // nonce stride
+    let dataset_ref = dataset.as_deref(); // Option<&Dataset>, shared by all threads
+
+    std::thread::scope(|scope| {
+        for t in 0..step {
+            let found = &found;
+            let winner = &winner;
+            let seal = &seal;
+            let target = &target;
+            scope.spawn(move || {
+                let mut nonce = start.wrapping_add(t); // this thread's first nonce
+                loop {
+                    if found.load(Ordering::Relaxed) {
+                        return; // someone else won
+                    }
+                    if let Some(flag) = interrupt {
+                        if flag.load(Ordering::SeqCst) {
+                            return; // stop requested
+                        }
+                    }
+                    let out = match dataset_ref {
+                        Some(d) => xepay_crypto::xephash::hashimoto_full(d, seal, nonce),
+                        None => engine.verify(index, seal, nonce),
+                    };
+                    match out {
+                        Ok(o) => {
+                            if xepay_crypto::xephash::meets_target(&o.result, target) {
+                                let mut w = winner.lock().unwrap_or_else(|e| e.into_inner());
+                                if w.is_none() {
+                                    *w = Some(nonce); // first winner is kept
+                                }
+                                found.store(true, Ordering::SeqCst);
+                                return;
+                            }
+                        }
+                        Err(_) => {
+                            found.store(true, Ordering::SeqCst); // fatal: stop all threads
+                            return;
+                        }
+                    }
+                    nonce = match nonce.checked_add(step) {
+                        Some(n) => n,
+                        None => return, // this thread's nonce space is exhausted
+                    };
                 }
-            }
-            Err(_) => return false,
+            });
         }
-        if block.nonce == u64::MAX {
-            return false; // nonce space exhausted
+    });
+
+    let result = *winner.lock().unwrap_or_else(|e| e.into_inner());
+    match result {
+        Some(n) => {
+            block.nonce = n; // winning nonce
+            block.hash = block.calculate_hash(); // block id with that nonce
+            true
         }
-        block.nonce = block.nonce.wrapping_add(1);
+        None => false,
     }
 }
 

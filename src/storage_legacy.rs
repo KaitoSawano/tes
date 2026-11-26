@@ -278,6 +278,8 @@ pub fn load_chain() -> std::io::Result<Blockchain> {
         eprintln!("[node] FATAL: state recovery failed: {}", e);
         std::process::exit(1);
     }
+    // The difficulty is derived from the chain; recompute it after loading.
+    chain.adjust_difficulty();
 
     if reindex_requested {
         eprintln!("[node] Reindex complete.");

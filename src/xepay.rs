@@ -43,6 +43,15 @@ fn main() {
         "getnetworkinfo" => rpc::call_and_print("getnetworkinfo", vec![]),
         "getpeerinfo" => rpc::call_and_print("getpeerinfo", vec![]),
         "getcheckpoints" => rpc::call_and_print("getcheckpoints", vec![]),
+        "getcheckpoint" => {
+            // Optional height; default is 1000 blocks below the tip.
+            let params = match args.get(2).and_then(|s| s.parse::<u64>().ok()) {
+                Some(h) => vec![json!(h)],
+                None => vec![],
+            };
+            rpc::call_and_print("getcheckpoint", params);
+        }
+        "estimatefee" => rpc::call_and_print("estimatefee", vec![]),
         "getblocktemplate" => {
             if args.len() < 3 {
                 println!("usage: xepay getblocktemplate \"<mining_address>\"");
@@ -286,6 +295,8 @@ fn print_help() {
     println!("  getnetworkinfo                      network parameters");
     println!("  getpeerinfo                         list connected peers");
     println!("  getcheckpoints                      list of active checkpoints");
+    println!("  getcheckpoint [height]              print a checkpoint line for a deep block");
+    println!("  estimatefee                         suggested fee (rises when the mempool is congested)");
     println!("  getblocktemplate \"<mining_address>\"  block template for miners");
     println!("  getblockcount                       number of blocks in the chain");
     println!("  getbestblockhash                    hash of the latest block");

@@ -625,6 +625,7 @@ pub fn validate_header_only(prev: &Block, h: &Block) -> Result<(), ValidationErr
         return Err(ValidationError::new("E062", "header hash does not match header"));
     }
     rule_header_nbits_path(prev, h)?;
+    rule_block_checkpoint(h)?;
     rule_block_pow(h)?;
     rule_block_timestamp_monotonic(prev, h)?;
     rule_block_chainwork(prev, h)?;
@@ -649,9 +650,7 @@ pub fn rule_header_nbits_path(prev: &Block, h: &Block) -> Result<(), ValidationE
         }
         return Ok(());
     }
-    let retarget_boundary = spec::current_network() != Network::Regtest
-        && prev.index > 0
-        && prev.index % spec::DIFFICULTY_ADJUST_INTERVAL == 0;
+    let retarget_boundary = rules::retarget_after(prev.index);
     let ok = if !retarget_boundary {
         h.nbits == prev.nbits
     } else {
