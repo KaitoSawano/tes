@@ -2031,7 +2031,7 @@ impl RpcHandler {
     }
 }
 
-impl RpcServer {
+impl RpcHandler {
     /// Print a checkpoint line for a deep block of the active chain, ready to
     /// paste into `blockchain::checkpoint` (default: 1000 blocks below the tip).
     fn m_getcheckpoint(&self, req: &RpcRequest) -> RpcResponse {
