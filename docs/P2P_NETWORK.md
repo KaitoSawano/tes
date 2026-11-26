@@ -22,4 +22,18 @@ When two nodes connect, they exchange `version` and `verack` messages to establi
 
 ## Synchronization
 
-Nodes use a `getheaders` / `headers` / `getdata` / `block` flow to synchronize the blockchain. A moving download window ensures efficient use of bandwidth.
+Nodes sync headers first: `getheaders` / `headers` / `getdata` / `block`. Every received header is
+validated (linkage, recomputed hash, difficulty path, proof of work, timestamp, chainwork, checkpoints)
+before it is accepted, so a peer cannot inflate the known chain with fake headers. At most 2,000
+headers are sent per message and 16 blocks are in flight per peer.
+
+A peer that sent `sendheaders` receives new blocks as a `headers` message (from the state root activation
+height, when a header alone proves the block); other peers receive `inv`. A header that does not connect
+makes the node ask for the missing headers with `getheaders`.
+
+Reorganizations never go below the highest checkpoint that is already in the chain.
+
+## Limits
+
+Maximum payload 32 MiB, 32 peers (8 outbound), 50,000 `inv` items and 1,000 `addr` items per message, with
+per-peer rate limits.

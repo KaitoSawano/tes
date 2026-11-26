@@ -1,79 +1,51 @@
 # XEPAY Consensus Rules
 
-XEPAY uses a strict set of rules to ensure all nodes agree on the state of the blockchain. Any change to these rules requires a hard fork or a new genesis block.
+All nodes must apply exactly these rules. The numbers are listed in
+`SPECIFICATION.md`; the algorithms are in `XEPHASH.md` and `CHECKPOINTS.md`.
+A change of any rule needs a hard fork (a new activation height).
 
-## Economic Parameters
+## Block validity
 
-| Parameter | Value |
-|---|---|
-| Max Supply | 485,000,000 XEPC |
-| Initial Reward | 15 XEPC |
-| Halving Interval | 16,166,666 blocks |
-| Block Time | 15 seconds |
-| Difficulty Adjust | 69,120 blocks |
+A block is valid only if all of the following hold:
 
-## Hashing and Signatures
+1. The version is 1 and the index is the parent index plus one; `previous_hash` is the parent hash.
+2. The header hash is recomputed and equal to `hash`. From the state root activation the hash covers the header only (merkle root and state root), so headers can be verified without their transactions.
+3. The proof of work is valid: header hash at most the target before the Xephash activation, Xephash at most the target from it.
+4. `nbits` equals the difficulty required at this height (see below), and `chainwork` is the parent chainwork plus the work of this block.
+5. The timestamp is not earlier than the parent's and at most 2 hours in the future.
+6. The block has at most 1,000 transactions; the merkle root matches the transaction ids; every transaction id matches its content.
+7. Every transaction has a valid ML-DSA-65 signature from the key that hashes to its sender address, the exact next nonce of the sender, an amount above zero, and a mature balance of at least amount plus fee. Money fields are checked against overflow.
+8. The subsidy equals the schedule for the height, `reward = subsidy + total fees`, and the supply never exceeds 780,000,000 XEPC.
+9. Applying the block changes the total money of the touched accounts by exactly the subsidy (a block cannot create coins by any other path).
+10. From the state root activation the declared `state_root` equals the root computed after applying the block (see below). Before it the field must be empty.
+11. The block does not violate a checkpoint (see `CHECKPOINTS.md`).
 
-- **Hash Algorithm:** SHA3-256
-- **Signature Algorithm:** secp256k1-ECDSA
+## Difficulty
 
-## Block Structure
+* Before the Xephash activation: legacy schedule, interval 69,120 blocks.
+* From the activation: the difficulty restarts at a fixed value, then every 3,600 blocks (15 hours at 15 s) it is retargeted from the measured time of the window (median time past at both ends). The change is limited to 0.25x .. 4x per window and the target never exceeds the proof-of-work limit.
+* `nbits` is recomputed from the chain, so it is correct after a restart or a reorg.
 
-- **Block Version:** 1
-- **Max Transactions per Block:** 10,000
-- **Max Note Length:** 4,096 bytes
-- **Coinbase Maturity:** 100 blocks
-- **Target Spacing:** 15 seconds
-- **Target Timespan:** 1,036,800 seconds (69,120 blocks * 15 seconds)
+## Fees
 
-## Genesis Blocks
+Fees are paid to the miner. The relay minimum is 1 ALD per byte (higher when the mempool is full); the wallet default is 0.01 XEPC and rises when the mempool holds more than one block. These are relay and wallet policies, not consensus rules.
 
-Each network (Mainnet, Testnet, Regtest) has a unique genesis block. The genesis block is locked forever. Any change to the consensus parameters requires mining a new genesis block.
+## State root
 
-## Validation Rules
+From `STATE_ROOT_ACTIVATION_*` every header carries `state_root`: the root of a hexary Merkle Patricia Trie over all accounts and registered public keys (key = SHA3-256 of the address, leaf value = SHA3-256 of the RLP encoded account, nodes RLP-encoded and referenced by SHA3-256, no inlining of small nodes). A block is accepted only if the root computed after applying it equals the declared one. The block is applied to an in-memory batch first; accounts, undo data and the tip marker are then committed in one synced LevelDB write, so a crash leaves either the old or the new state. On start the node replays, rolls back or rebuilds the state as needed.
 
-All nodes must enforce the following rules:
-- Block version must be 1.
-- The previous hash must match the tip of the chain.
-- The block hash must meet the target difficulty.
-- The coinbase transaction must be valid (subsidy + fees).
-- All transactions must have valid signatures and nonces.
-- The state root must match the computed state after applying all transactions.
+## Public key registry
 
-## Fee-Based Security
+A ML-DSA-65 public key is 1952 bytes. From the activation the first transaction of an address carries its public key; the node stores it (it is part of the state root and is undone with the block on a reorg). Later transactions of that address may leave the key out and are verified with the registered key. The signing hash does not cover the key.
 
-As the block subsidy decreases over time due to halving, miners rely on transaction fees to secure the network. XEPAY enforces a minimum relay fee (`MIN_RELAY_FEE_PER_BYTE`) to prevent spam and ensure miners are compensated.
+## Proof of work
 
+See `XEPHASH.md`. The block id (`hash`) is the SHA3-256 hash of the full header; Xephash is computed from the header hash without the nonce (`seal_hash`) and the nonce.
 
-## State root (Merkle-trie)
+## Activation (hard fork)
 
-From `rules::state_root_activation_height()` every block header carries
-`state_root`: the root of a hexary Merkle Patricia Trie over all accounts
-(key = SHA3-256(address), leaf value = SHA3-256(RLP(account)), nodes
-RLP-encoded and referenced by SHA3-256 hash, no inlining). The block hash
-from that height covers the header only (merkle root + state root), so
-headers can be verified without transaction bodies (used by `sendheaders`).
+State root, key registry, Xephash and the 15 hour retarget activate at heights set in `src/consensus/rules.rs` (see `SPECIFICATION.md`, section 8). Blocks below the activation keep the old rules, so the existing chain stays valid. Every node must upgrade before the activation height.
 
-A block is accepted only if the root computed after applying it equals the
-declared one. Application is atomic: accounts, undo data and the tip marker
-are committed in one synced LevelDB write; on startup `recover_state`
-replays, rolls back or rebuilds as needed.
+## Genesis
 
-Before activation `state_root` must be empty and the legacy hash layout is
-used, so existing blocks remain valid. All nodes must upgrade before the
-activation height (hard fork).
-
-## Public key registry (smaller blocks)
-
-An ML-DSA-65 public key is 1952 bytes, about a third of a transfer. From the
-activation height the first transaction of an address carries its public
-key; the node stores it in the state (part of the state root, undone with the
-block on a reorg). Later transactions of that address leave the key out and are
-verified with the registered key. The signing hash does not cover the key, so
-signatures are unchanged. A transaction that still carries the key is valid.
-
-## Proof of work and difficulty
-
-From the Xephash activation height the proof of work is Xephash (see `XEPHASH.md`),
-the difficulty restarts and is retargeted every 15 hours (3600 blocks), clamped to
-0.25x .. 4x per window. This is part of the same hard fork as the state root.
+Each network has its own genesis block, mined and verified at start. The genesis block is never changed.

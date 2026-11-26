@@ -387,6 +387,7 @@ impl RpcHandler {
             "getpeerinfo" => self.m_getpeerinfo(),
             "getcheckpoints" => m_getcheckpoints(),
             "getcheckpoint" => self.m_getcheckpoint(req),
+            "generatecheckpoints" => self.m_generatecheckpoints(req),
             "getblocktemplate" => self.m_getblocktemplate(req),
             "submitblock" => self.m_submitblock(req),
             "getbalance" => self.m_getbalance(req),
@@ -616,7 +617,20 @@ impl RpcHandler {
             "era": c.current_era(),
             "subsidy_halving_interval": consensus::subsidy_halving_interval(),
             "blocks_until_halving": c.blocks_until_halving(),
-            "difficulty_adjust_interval": consensus::difficulty_adjust_interval(),
+            // Interval that applies to the next block: 3600 (15 hours) once Xephash is active.
+            "difficulty_adjust_interval": if crate::consensus::rules::xephash_active(c.height() + 1) {
+                crate::consensus::spec::RETARGET_INTERVAL_BLOCKS_V2
+            } else {
+                consensus::difficulty_adjust_interval()
+            },
+            "retarget_timespan_hours": crate::consensus::spec::RETARGET_TIMESPAN_SECS_V2 / 3600,
+            "pow_algorithm": if crate::consensus::rules::xephash_active(c.height() + 1) {
+                "xephash"
+            } else {
+                "sha3-256"
+            },
+            "xephash_activation_height": crate::consensus::rules::xephash_activation_height(),
+            "state_root_activation_height": crate::consensus::rules::state_root_activation_height(),
             "consensus_fingerprint": self.state.fingerprint(),
             "datadir": datadir::as_str(&datadir::datadir()),
             "total_chainwork": c.total_chainwork().to_string(),
@@ -2032,6 +2046,39 @@ impl RpcHandler {
 }
 
 impl RpcHandler {
+    /// Print a whole checkpoint table for the active chain: one entry every
+    /// `interval` blocks (default 1000), only blocks buried by at least
+    /// `depth` confirmations (default 100). Paste the lines into the list of
+    /// the network in `blockchain::checkpoint`.
+    fn m_generatecheckpoints(&self, req: &RpcRequest) -> RpcResponse {
+        let interval = req
+            .params
+            .first()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1000)
+            .max(10);
+        let depth = req.params.get(1).and_then(|v| v.as_u64()).unwrap_or(100);
+        let chain = self.state.chain.blocking_read();
+        let tip = chain.height();
+        let mut lines: Vec<String> = Vec::new();
+        let mut h = interval;
+        while h.saturating_add(depth) <= tip {
+            if let Some(b) = chain.chain.get(h as usize) {
+                lines.push(format!("Checkpoint {{ height: {}, hash: \"{}\" }},", b.index, b.hash));
+            }
+            h = match h.checked_add(interval) {
+                Some(v) => v,
+                None => break,
+            };
+        }
+        RpcResponse::ok(json!({
+            "network": crate::consensus::spec::current_network().name(),
+            "tip": tip,
+            "count": lines.len(),
+            "lines": lines,
+        }))
+    }
+
     /// Print a checkpoint line for a deep block of the active chain, ready to
     /// paste into `blockchain::checkpoint` (default: 1000 blocks below the tip).
     fn m_getcheckpoint(&self, req: &RpcRequest) -> RpcResponse {
@@ -2059,10 +2106,17 @@ impl RpcHandler {
 }
 
 fn m_getcheckpoints() -> RpcResponse {
-    let items: Vec<Value> = blockchain::checkpoint::list()
-        .iter()
-        .map(|c| json!({"height": c.height, "hash": c.hash}))
-        .collect();
+    // The genesis block is checkpoint 0 and is always enforced.
+    let mut items: Vec<Value> = vec![json!({
+        "height": 0,
+        "hash": blockchain::checkpoint::genesis_hash(),
+        "genesis": true,
+    })];
+    items.extend(
+        blockchain::checkpoint::list()
+            .iter()
+            .map(|c| json!({"height": c.height, "hash": c.hash})),
+    );
     RpcResponse::ok(json!(items))
 }
 

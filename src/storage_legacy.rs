@@ -266,6 +266,11 @@ pub fn load_chain() -> std::io::Result<Blockchain> {
     // The check runs on every start, not only when the state looks empty,
     // because an empty-looking state with a non-empty chain is exactly
     // the failure mode that produced a state that lags the chain tip.
+    // A malformed checkpoint table must stop the node before anything else.
+    if let Err(e) = crate::blockchain::checkpoint::self_check() {
+        eprintln!("[node] FATAL: invalid checkpoint table: {}", e);
+        std::process::exit(1);
+    }
     // An explicit reindex always replays every block (and verifies each
     // declared state root); otherwise the state is recovered from its
     // atomic tip marker.
@@ -280,6 +285,13 @@ pub fn load_chain() -> std::io::Result<Blockchain> {
     }
     // The difficulty is derived from the chain; recompute it after loading.
     chain.adjust_difficulty();
+    // Checkpoints are enforced on the stored chain too, not only on new blocks.
+    if let Err(e) = crate::blockchain::checkpoint::verify_chain(&chain.chain) {
+        eprintln!("[node] FATAL: stored chain violates a checkpoint: {}", e);
+        eprintln!("[node] The data directory is corrupt, tampered with or on another fork.");
+        eprintln!("[node] Remove the block data and resync from the network.");
+        std::process::exit(1);
+    }
 
     if reindex_requested {
         eprintln!("[node] Reindex complete.");

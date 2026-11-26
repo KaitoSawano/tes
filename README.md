@@ -1,44 +1,51 @@
-> A serious, fast-block Layer-1 payment network written in Rust.
-> **SHA3-256** as the sole cryptographic primitive.
-> **~15-second target block time**, enforced by an adaptive difficulty algorithm.
+> A fast-block, post-quantum Layer-1 payment network written in Rust.
+> **ML-DSA-65** signatures, **SHA3-256** hashing, **Xephash** memory-hard proof of work.
+> **15-second target block time**, difficulty retargeted every 15 hours.
 
 ![language](https://img.shields.io/badge/language-Rust-orange)
 ![hash](https://img.shields.io/badge/hash-SHA3--256-green)
-![consensus](https://img.shields.io/badge/consensus-Proof%20of%20Work-purple)
+![signatures](https://img.shields.io/badge/signatures-ML--DSA--65-blue)
+![consensus](https://img.shields.io/badge/consensus-Proof%20of%20Work%20(Xephash)-purple)
 
 ---
 
 ## Overview
 
-**XEPAY** (**XEPC**) is a Layer-1 proof-of-work payment network written in Rust. It is an independent implementation, built in stages toward a production-grade Layer-1, and it uses an Account-Based model backed by a Merkle Patricia Trie and LevelDB. 
+**XEPAY** (**XEPC**) is an independent Layer-1 proof-of-work payment network written in Rust.
+It uses an account-based ledger, a Merkle Patricia Trie state root, LevelDB storage and a
+headers-first peer-to-peer protocol. It focuses on one job: fast, verifiable value transfer.
 
-XEPAY is engineered around three core design commitments. First, it aims to provide a fast and predictable block time. The network targets an average of 15 seconds per block, which is sustained by a strict and adaptive difficulty adjustment algorithm. This ensures that the network remains responsive to sudden changes in hash rate while maintaining a consistent and reliable transaction finality. Second, XEPAY commits to a modern and standardized cryptographic hash. By using SHA3-256 as its sole hashing primitive, XEPAY ensures a high level of security and insulation from future cryptanalytic surprises that might affect older hash functions. Third, XEPAY is designed to be verifiable by construction. Every block in the chain is a cryptographic commitment to its predecessor, every hash is fully recomputable, and every validation step is deterministic. This design eliminates ambiguity and ensures that any node can independently verify the entire history of the network from the genesis block to the current tip.
+* **Post-quantum signatures:** every transaction is signed with ML-DSA-65 (FIPS 204).
+* **Memory-hard proof of work:** Xephash (SHA3-256 based) keeps verification light (a few milliseconds) while mining depends on memory bandwidth. See `docs/XEPHASH.md`.
+* **Verifiable by construction:** every block commits to its parent, to its transactions and to the full state (state root); nodes verify everything from genesis.
+* **Safe by design:** atomic state commits, crash recovery, overflow-checked arithmetic, a per-block money-conservation check and hard-coded checkpoints.
+* **Fee market:** the default fee is 0.01 XEPC and rises when the mempool has a backlog.
 
-Beyond these core commitments, XEPAY is designed to be a reliable, fast, and secure medium of exchange. It focuses entirely on peer-to-peer value transfer, avoiding unnecessary complexity and state bloat. The network maintains a strict state verification system, ensuring that every node operates on the exact same data without relying on external intermediaries. This strict verification process eliminates the risk of silent state corruption and ensures the integrity of the ledger at all times. The architecture is built to be robust, scalable, and ready for long-term sustainability, providing a solid foundation for a global payment network.
+## Key numbers
 
----
+| | |
+|---|---|
+| Maximum supply | 780,000,000 XEPC (8 decimals) |
+| Initial block reward | 15 XEPC, reduced by 10% every 5,200,000 blocks (about 2.47 years) |
+| Block time | 15 seconds |
+| Difficulty retarget | every 15 hours (3,600 blocks), limited to 0.25x .. 4x per window |
+| Block limit | 1,000 transactions |
+| Coinbase maturity | 100 blocks |
+| Default fee | 0.01 XEPC |
+
+The complete, code-derived specification is in `docs/SPECIFICATION.md`.
 
 ## Install
 
-### From source
 ```bash
 git clone https://github.com/xepay-project/xepay.git
 cd xepay
 cargo build --release
-```
-After building, copy the binaries to the project root using the provided script:
-```bash
-./build.sh
-```
-Now you can run the CLI directly:
-```bash
+./build.sh          # copies the binaries to the project root
 ./xepay help
 ```
----
 
 ## Networks
-
-XEPAY supports three independent networks, each with its own genesis block and ports. You can select a network by passing the corresponding flag to the node and CLI.
 
 | Network | Flag | P2P Port | RPC Port |
 |---|---|---|---|
@@ -46,33 +53,29 @@ XEPAY supports three independent networks, each with its own genesis block and p
 | Testnet | -testnet | 12255 | 12254 |
 | Regtest | -regtest | 18444 | 18443 |
 
-### What is Regtest?
+Regtest is a private network for local development with trivial difficulty.
 
-Regtest (Regression Test) is a private, isolated network for local development. It uses a trivially low proof-of-work difficulty, allowing developers to mine blocks instantly. It is not connected to the public network and should only be used for testing.
+## Running
 
----
-
-## Running a Node
-
-To run a node on the Mainnet:
 ```bash
-./xepayd
+./xepayd                # mainnet node
+./xepayd -testnet       # testnet node
+./xepayd -regtest       # local development
+XEPC_MINE_FOR="<address>" ./xepay-miner   # stand-alone miner (all CPU cores)
 ```
-To run a node on the Testnet:
-```bash
-./xepayd -testnet
-```
-To run a node on the Regtest network (for local development):
-```bash
-./xepayd -regtest
-```
----
+
+## Documentation
+
+| Document | Content |
+|---|---|
+| `docs/SPECIFICATION.md` | all parameters: supply, emission, fees, networks, P2P |
+| `docs/CONSENSUS.md` | block validity rules, difficulty, state root |
+| `docs/XEPHASH.md` | the proof-of-work algorithm and the `xephash` tool |
+| `docs/CHECKPOINTS.md` | how checkpoints work and how to add them |
+| `docs/ARCHITECTURE.md`, `docs/P2P_NETWORK.md`, `docs/SECURITY.md` | design and threat model |
+| `docs/RPC_API.md`, `docs/WALLET.md`, `docs/GETTING_STARTED.md` | usage |
 
 ## License
 
 Copyright (c) 2026 **Aldianokto**.
-
-Licensed under the **Apache License, Version 2.0**.
-See the LICENSE file for the full text.
-
----
+Licensed under the **Apache License, Version 2.0**. See the LICENSE file.

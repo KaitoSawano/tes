@@ -274,6 +274,73 @@ pub mod checkpoint {
     pub fn reorg_allowed(fork_point: u64, tip_height: u64) -> bool {
         reorg_allowed_in(list(), fork_point, tip_height)
     }
+
+    /// Hash of the genesis block of the running network (checkpoint 0).
+    pub fn genesis_hash() -> &'static str {
+        use crate::consensus::genesis;
+        match spec::current_network() {
+            Network::Main => genesis::EXPECTED_GENESIS_HASH,
+            Network::Test => genesis::TESTNET_EXPECTED_GENESIS_HASH,
+            Network::Regtest => genesis::REGTEST_EXPECTED_GENESIS_HASH,
+        }
+    }
+
+    /// Reject a malformed table: heights must start above 0 and strictly
+    /// increase, hashes must be 64 lowercase hex characters. A typo in a
+    /// checkpoint would otherwise silently lock a node out of the real chain.
+    pub fn validate_table(list: &[Checkpoint]) -> Result<(), String> {
+        let mut previous: Option<u64> = None;
+        for c in list {
+            if c.height == 0 {
+                return Err("checkpoint height 0 is the genesis block (implicit)".to_string());
+            }
+            if let Some(p) = previous {
+                if c.height <= p {
+                    return Err(format!("checkpoint {} is not above the previous one", c.height));
+                }
+            }
+            let ok = c.hash.len() == 64
+                && c.hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            if !ok {
+                return Err(format!("checkpoint {} has a malformed hash", c.height));
+            }
+            previous = Some(c.height);
+        }
+        Ok(())
+    }
+
+    /// Check every shipped table. Called at node start.
+    pub fn self_check() -> Result<(), String> {
+        validate_table(MAIN_CHECKPOINTS)?;
+        validate_table(TEST_CHECKPOINTS)?;
+        validate_table(REGTEST_CHECKPOINTS)
+    }
+
+    /// Verify a loaded chain against the genesis hash and every checkpoint
+    /// that is already inside it. A mismatch means the data directory was
+    /// tampered with or belongs to a different fork.
+    pub fn verify_chain(blocks: &[crate::block::Block]) -> Result<(), String> {
+        if let Some(g) = blocks.first() {
+            if !genesis_hash().eq_ignore_ascii_case(&g.hash) {
+                return Err(format!(
+                    "genesis block {} does not match the network genesis {}",
+                    g.hash,
+                    genesis_hash()
+                ));
+            }
+        }
+        for c in list() {
+            if let Some(b) = blocks.get(c.height as usize) {
+                if b.index != c.height || !c.hash.eq_ignore_ascii_case(&b.hash) {
+                    return Err(format!(
+                        "block at height {} is {} but the checkpoint requires {}",
+                        c.height, b.hash, c.hash
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub mod dns_seed {

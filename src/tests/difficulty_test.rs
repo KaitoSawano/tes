@@ -209,3 +209,33 @@ fn checkpoints_verify_and_lock_history() {
     assert!(checkpoint::reorg_allowed_in(LIST, 500, 1_000));
     assert!(checkpoint::reorg_allowed_in(LIST, 0, 50)); // checkpoint not reached yet
 }
+
+#[test]
+fn shipped_checkpoint_tables_are_well_formed() {
+    assert!(checkpoint::self_check().is_ok());
+    // The validator itself must catch the typical mistakes.
+    let good = "a".repeat(64);
+    let leak: &'static str = Box::leak(good.into_boxed_str());
+    let bad_hex: &'static str = Box::leak("g".repeat(64).into_boxed_str());
+    let short: &'static str = "abc";
+    let upper: &'static str = Box::leak("A".repeat(64).into_boxed_str());
+    assert!(checkpoint::validate_table(&[Checkpoint { height: 10, hash: leak }]).is_ok());
+    assert!(checkpoint::validate_table(&[Checkpoint { height: 0, hash: leak }]).is_err());
+    assert!(checkpoint::validate_table(&[Checkpoint { height: 10, hash: bad_hex }]).is_err());
+    assert!(checkpoint::validate_table(&[Checkpoint { height: 10, hash: short }]).is_err());
+    assert!(checkpoint::validate_table(&[Checkpoint { height: 10, hash: upper }]).is_err());
+    assert!(checkpoint::validate_table(&[
+        Checkpoint { height: 20, hash: leak },
+        Checkpoint { height: 10, hash: leak },
+    ])
+    .is_err());
+}
+
+#[test]
+#[serial]
+fn genesis_of_a_fresh_chain_matches_the_network_genesis() {
+    with_temp_datadir(|| {
+        let chain = Blockchain::new();
+        assert!(checkpoint::verify_chain(&chain.chain).is_ok());
+    });
+}

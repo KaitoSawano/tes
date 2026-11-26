@@ -11,7 +11,7 @@ This guide will help you build, configure, and run an XEPAY node from source.
 ## 2. Build from Source
 
     git clone https://github.com/xepay-project/xepay.git
-    cd block
+    cd xepay
     cargo build --release
 
 ## 3. Network Selection
@@ -34,7 +34,7 @@ This guide will help you build, configure, and run an XEPAY node from source.
 ## 6. Create a Wallet
 
     ./xepay -regtest getcreatewallet
-    ./xepay -regtest createhdwallet 12
+    ./xepay -regtest getcreatewalletbech32
 
 ## 7. Mining
 
@@ -42,7 +42,8 @@ This guide will help you build, configure, and run an XEPAY node from source.
 
 ## 8. Send Funds
 
-    ./xepay -regtest sendtoaddress 5 "<to_address>" "<from_address>"
+    ./xepay -regtest sendtoaddress 5 "<to_address>"
+    ./xepay -regtest estimatefee
 
 ## 9. Configuration File
 
@@ -56,6 +57,13 @@ This guide will help you build, configure, and run an XEPAY node from source.
 
     ./xepayd -regtest -reindex
 
-## 11. Troubleshooting
+A reindex replays every block and checks every declared state root.
+
+## 11. Tools
+
+    cargo run -p xepay-crypto --release --bin xephash -- bench regtest 5
+    ./xepay generatecheckpoints
+
+## 12. Troubleshooting
 
 If RPC connection is refused, ensure the node is running and check the cookie file at ~/.xepay-regtest/.cookie.

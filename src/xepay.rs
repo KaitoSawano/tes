@@ -52,6 +52,17 @@ fn main() {
             rpc::call_and_print("getcheckpoint", params);
         }
         "estimatefee" => rpc::call_and_print("estimatefee", vec![]),
+        "generatecheckpoints" => {
+            // Optional: interval between checkpoints, minimum confirmations.
+            let mut params = Vec::new();
+            if let Some(i) = args.get(2).and_then(|s| s.parse::<u64>().ok()) {
+                params.push(json!(i));
+                if let Some(d) = args.get(3).and_then(|s| s.parse::<u64>().ok()) {
+                    params.push(json!(d));
+                }
+            }
+            rpc::call_and_print("generatecheckpoints", params);
+        }
         "getblocktemplate" => {
             if args.len() < 3 {
                 println!("usage: xepay getblocktemplate \"<mining_address>\"");
@@ -296,6 +307,7 @@ fn print_help() {
     println!("  getpeerinfo                         list connected peers");
     println!("  getcheckpoints                      list of active checkpoints");
     println!("  getcheckpoint [height]              print a checkpoint line for a deep block");
+    println!("  generatecheckpoints [step] [depth]  print a full checkpoint table (default: every 1000 blocks, 100 confirmations)");
     println!("  estimatefee                         suggested fee (rises when the mempool is congested)");
     println!("  getblocktemplate \"<mining_address>\"  block template for miners");
     println!("  getblockcount                       number of blocks in the chain");
