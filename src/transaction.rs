@@ -83,7 +83,7 @@ impl Transaction {
         let hex_payload = hex::encode(message.as_bytes());
         let note = format!("{}{}", rules::MESSAGE_PREFIX, hex_payload);
 
-        if note.len() > rules::MAX_NOTE_LEN {
+        if note.len() > rules::max_note_len_latest() {
             return Err("encoded message exceeds note size limit".into());
         }
 
@@ -231,7 +231,7 @@ impl Transaction {
                 || address::verify_bech32_address(&self.to))
             && self.from != self.to
             && self.amount > 0
-            && self.note.len() <= crate::consensus::rules::MAX_NOTE_LEN
+            && self.note.len() <= crate::consensus::rules::max_note_len_latest()
             && self.verify_signature()
             && self
                 .expected_address()

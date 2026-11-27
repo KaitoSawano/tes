@@ -72,6 +72,7 @@ XEPC_MINE_FOR="<address>" ./xepay-miner   # stand-alone miner (all CPU cores)
 | `docs/CONSENSUS.md` | block validity rules, difficulty, state root |
 | `docs/XEPHASH.md` | the proof-of-work algorithm and the `xephash` tool |
 | `docs/CHECKPOINTS.md` | how checkpoints work and how to add them |
+| `docs/GENESIS_AND_RULES.md` | immutable genesis, rule schedule and upgrade process |
 | `docs/ARCHITECTURE.md`, `docs/P2P_NETWORK.md`, `docs/SECURITY.md` | design and threat model |
 | `docs/RPC_API.md`, `docs/WALLET.md`, `docs/GETTING_STARTED.md` | usage |
 

@@ -142,7 +142,7 @@ pub fn load_chain() -> std::io::Result<Blockchain> {
             ));
         }
     }
-    if blocks[0].previous_hash != crate::consensus::rules::ZERO_HASH {
+    if blocks[0].previous_hash != crate::consensus::genesis::GENESIS_PREVIOUS_HASH {
         return Err(Error::other(
             "consensus failure: the genesis block previous_hash is not zero.",
         ));
@@ -266,6 +266,11 @@ pub fn load_chain() -> std::io::Result<Blockchain> {
     // The check runs on every start, not only when the state looks empty,
     // because an empty-looking state with a non-empty chain is exactly
     // the failure mode that produced a state that lags the chain tip.
+    // A malformed rule schedule must stop the node before anything else.
+    if let Err(e) = crate::consensus::rules::validate_schedule() {
+        eprintln!("[node] FATAL: invalid rule schedule: {}", e);
+        std::process::exit(1);
+    }
     // A malformed checkpoint table must stop the node before anything else.
     if let Err(e) = crate::blockchain::checkpoint::self_check() {
         eprintln!("[node] FATAL: invalid checkpoint table: {}", e);

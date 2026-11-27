@@ -320,16 +320,26 @@ pub mod checkpoint {
     /// that is already inside it. A mismatch means the data directory was
     /// tampered with or belongs to a different fork.
     pub fn verify_chain(blocks: &[crate::block::Block]) -> Result<(), String> {
+        verify_chain_in(list(), genesis_hash(), blocks)
+    }
+
+    /// Same as `verify_chain` with an explicit table and genesis hash. It never
+    /// panics: a missing block (the chain is shorter than a checkpoint height)
+    /// is not an error, a different hash is reported as `Err`.
+    pub fn verify_chain_in(
+        list: &[Checkpoint],
+        genesis_hash: &str,
+        blocks: &[crate::block::Block],
+    ) -> Result<(), String> {
         if let Some(g) = blocks.first() {
-            if !genesis_hash().eq_ignore_ascii_case(&g.hash) {
+            if !genesis_hash.eq_ignore_ascii_case(&g.hash) {
                 return Err(format!(
                     "genesis block {} does not match the network genesis {}",
-                    g.hash,
-                    genesis_hash()
+                    g.hash, genesis_hash
                 ));
             }
         }
-        for c in list() {
+        for c in list {
             if let Some(b) = blocks.get(c.height as usize) {
                 if b.index != c.height || !c.hash.eq_ignore_ascii_case(&b.hash) {
                     return Err(format!(
@@ -679,7 +689,7 @@ impl Blockchain {
     /// in a block, plus a 10% margin to outbid it. This is what makes
     /// fees rise when the mempool fills up.
     pub fn next_block_fee_rate(&self) -> u64 {
-        let cap = rules::MAX_TX_PER_BLOCK;
+        let cap = rules::max_tx_per_block_at(self.height().saturating_add(1));
         if self.mempool.len() < cap {
             return 0;
         }
@@ -1016,7 +1026,8 @@ impl Blockchain {
 
         let mut valid: Vec<Transaction> = Vec::new();
         let mut fees: u64 = 0;
-        while valid.len() < crate::consensus::rules::MAX_TX_PER_BLOCK {
+        let block_cap = crate::consensus::rules::max_tx_per_block_at(next_index);
+        while valid.len() < block_cap {
             let sender = match heap.pop() {
                 Some((_, Reverse(s))) => s,
                 None => break,

@@ -1288,7 +1288,7 @@ impl RpcHandler {
             "default_fee_xepc": to_coin(DEFAULT_FEE_XEPC),
             "default_fee_ald": to_aldian(DEFAULT_FEE_XEPC),
             "max_txs": blockchain::MEMPOOL_MAX_TXS,
-            "block_capacity_txs": crate::consensus::rules::MAX_TX_PER_BLOCK,
+            "block_capacity_txs": crate::consensus::rules::max_tx_per_block_at(chain.height() + 1),
             "next_block_fee_rate_ald_per_byte": chain.next_block_fee_rate(),
         }))
     }
@@ -1307,7 +1307,7 @@ impl RpcHandler {
             "suggested_fee_ald": to_aldian(fee),
             "typical_tx_size_bytes": blockchain::TYPICAL_TX_SIZE_BYTES,
             "mempool_txs": chain.mempool.len(),
-            "block_capacity_txs": crate::consensus::rules::MAX_TX_PER_BLOCK,
+            "block_capacity_txs": crate::consensus::rules::max_tx_per_block_at(chain.height() + 1),
             "congested": rate > 0,
         }))
     }

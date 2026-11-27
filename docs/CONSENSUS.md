@@ -48,4 +48,8 @@ State root, key registry, Xephash and the 15 hour retarget activate at heights s
 
 ## Genesis
 
-Each network has its own genesis block, mined and verified at start. The genesis block is never changed.
+Each network has its own genesis block and it is immutable. Its hash depends on genesis
+parameters only: timestamp, nbits, message, secret, output script, network name, hash and
+signature algorithm and the supply economics (maximum supply, initial reward, reduction
+interval and ratio, maximum eras, decimals, units per coin). Rule parameters never enter
+the genesis block. See `GENESIS_AND_RULES.md`.

@@ -119,6 +119,12 @@ omit its public key when the sender's key is already registered.
 The mainnet values are placeholders: set them above the current tip plus a safety
 margin before the release, and make every node upgrade before that height.
 
+## 8b. Rule schedule
+
+Rule parameters (`MAX_TX_PER_BLOCK`, `COINBASE_MATURITY`, `MAX_NOTE_LEN`, `BLOCK_VERSION`) are the base
+rules from block 1. They change only through `RuleEra` entries (activation height) in
+`src/consensus/rules.rs`; the schedules are empty today. They never influence the genesis block.
+
 ## 9. Checkpoints
 
 Hard-coded lists per network in `blockchain::checkpoint` (see `CHECKPOINTS.md`).
@@ -137,11 +143,12 @@ Genesis (message `XEPAY Genesis - 2026`):
 
 | Network | Timestamp (UTC) | Hash |
 |---|---|---|
-| Mainnet | 2026-11-15 09:09:40 | `000003a11070c420c5ad794b67a50b34c3ef77da848dfb96d4a612d7ce7d2e55` |
-| Testnet | 2026-11-15 09:12:12 | `00000635732b58e6b1dcd5415812c8d2eb2d4d75bddad90383439fb84f153598` |
-| Regtest | 2026-11-15 09:13:24 | `5559761049b93e0b118f02a829b9cdc0a7769addf55d7c0c5c145ec40d4f6f80` |
+| Mainnet | 2026-11-15 09:09:40 | `00000828c058152573d532f6cfbacd535fec17f084a0aadfcc9dfaca6de69a5f` |
+| Testnet | 2026-11-15 09:12:12 | `000009e097b67cc9806255f29717695be465077fb2b6693d8bb2cf3720c2a5ef` |
+| Regtest | 2026-11-15 09:13:24 | `7376a1f85b4b34bdb47ba581cbce501a96284560425614764da3082a3e14fa8e` |
 
-The node mines the genesis block at start and refuses to run if it does not
+The genesis block is immutable and depends on genesis parameters only (see
+`GENESIS_AND_RULES.md`). The node mines it at start and refuses to run if it does not
 reproduce these hashes. `xepay getgenesishash` prints the active one.
 
 ## 11. Peer-to-peer protocol

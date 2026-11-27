@@ -175,14 +175,21 @@ pub fn rule_amount_nonzero(tx: &Transaction) -> Result<(), ValidationError> {
     Ok(())
 }
 
-pub fn rule_note_length(tx: &Transaction) -> Result<(), ValidationError> {
-    if tx.note.len() > MAX_NOTE_LEN {
+/// Note length rule at `height` (the limit can change through a rule era).
+pub fn rule_note_length_at(tx: &Transaction, height: u64) -> Result<(), ValidationError> {
+    let limit = rules::max_note_len_at(height);
+    if tx.note.len() > limit {
         return Err(ValidationError::new(
             "E006",
-            format!("note exceeds {} bytes", MAX_NOTE_LEN),
+            format!("note exceeds {} bytes", limit),
         ));
     }
     Ok(())
+}
+
+/// Note length rule of the newest rules (for building new transactions).
+pub fn rule_note_length(tx: &Transaction) -> Result<(), ValidationError> {
+    rule_note_length_at(tx, u64::MAX)
 }
 
 /// Verify the signature of `tx` against the public key `pk`.
@@ -329,12 +336,13 @@ pub fn rule_sufficient_balance(chain: &Blockchain, tx: &Transaction) -> Result<(
 }
 
 pub fn rule_block_version(block: &Block) -> Result<(), ValidationError> {
-    if block.nversion != BLOCK_VERSION {
+    let expected_version = rules::block_version_at(block.index);
+    if block.nversion != expected_version {
         return Err(ValidationError::new(
             "E028",
             format!(
                 "unsupported block version {} at index {}: expected {}",
-                block.nversion, block.index, BLOCK_VERSION
+                block.nversion, block.index, expected_version
             ),
         ));
     }
@@ -342,13 +350,14 @@ pub fn rule_block_version(block: &Block) -> Result<(), ValidationError> {
 }
 
 pub fn rule_block_tx_count(block: &Block) -> Result<(), ValidationError> {
-    if block.transactions.len() > MAX_TX_PER_BLOCK {
+    let limit = rules::max_tx_per_block_at(block.index);
+    if block.transactions.len() > limit {
         return Err(ValidationError::new(
             "E030",
             format!(
                 "block contains {} transactions, exceeding the limit of {}",
                 block.transactions.len(),
-                MAX_TX_PER_BLOCK
+                limit
             ),
         ));
     }
@@ -557,7 +566,7 @@ pub fn rule_genesis(block: &Block) -> Result<(), ValidationError> {
             "the genesis block must have index 0",
         ));
     }
-    if block.previous_hash != ZERO_HASH {
+    if block.previous_hash != crate::consensus::genesis::GENESIS_PREVIOUS_HASH {
         return Err(ValidationError::new(
             "E039",
             "the genesis block previous_hash must be zero",
@@ -743,8 +752,8 @@ pub fn validate_transaction(chain: &Blockchain, tx: &Transaction) -> Result<(), 
     rule_message_format(tx)?;
     rule_amount_nonzero(tx)?;
     rule_money_range(tx)?;
-    rule_note_length(tx)?;
     let next_height = chain.height().saturating_add(1);
+    rule_note_length_at(tx, next_height)?;
     let pk = resolve_pubkey(tx, next_height, |a| chain.state.get_pubkey(a))?;
     rule_signature_with(tx, &pk)?;
     rule_address_matches_with(tx, &pk)?;
@@ -776,7 +785,7 @@ pub fn validate_tx_for_block(
     rule_message_format(tx)?;
     rule_amount_nonzero(tx)?;
     rule_money_range(tx)?;
-    rule_note_length(tx)?;
+    rule_note_length_at(tx, height)?;
     let pk = resolve_pubkey(tx, height, |a| chain.state.get_pubkey(a))?;
     rule_signature_with(tx, &pk)?;
     rule_address_matches_with(tx, &pk)?;
@@ -835,7 +844,7 @@ pub fn validate_block_transactions(
         rule_message_format(tx)?;
         rule_amount_nonzero(tx)?;
         rule_money_range(tx)?;
-        rule_note_length(tx)?;
+        rule_note_length_at(tx, height)?;
         // Key resolution: carried key, else one registered by an earlier
         // transaction of this block, else the on-chain registry.
         let pk = if !tx.public_key.is_empty() {
@@ -1040,9 +1049,10 @@ pub fn validate_chain(chain: &mut Blockchain) -> Result<(), ValidationError> {
             )
         };
 
-        if cur_nversion != BLOCK_VERSION {
+        let expected_version = rules::block_version_at(cur_index);
+        if cur_nversion != expected_version {
             return Err(ValidationError::new("E028",
-                format!("unsupported block version {} at index {}: expected {}", cur_nversion, cur_index, BLOCK_VERSION)));
+                format!("unsupported block version {} at index {}: expected {}", cur_nversion, cur_index, expected_version)));
         }
         if cur_index != prev_index + 1 {
             return Err(ValidationError::new("E036",
@@ -1101,9 +1111,10 @@ pub fn validate_chain(chain: &mut Blockchain) -> Result<(), ValidationError> {
                     format!("mined_for address of block {} is invalid: {}", cur_index, cur_mined_for))
             })?;
         }
-        if cur_tx_count > MAX_TX_PER_BLOCK {
+        let tx_limit = rules::max_tx_per_block_at(cur_index);
+        if cur_tx_count > tx_limit {
             return Err(ValidationError::new("E030",
-                format!("block contains {} transactions, exceeding the limit of {}", cur_tx_count, MAX_TX_PER_BLOCK)));
+                format!("block contains {} transactions, exceeding the limit of {}", cur_tx_count, tx_limit)));
         }
         if cur_timestamp < prev_timestamp {
             return Err(ValidationError::new("E032",

@@ -262,7 +262,7 @@ impl Block {
             .unwrap_or(u128::MAX);
 
         let mut b = Block {
-            nversion: rules::BLOCK_VERSION,
+            nversion: rules::block_version_at(index),
             index,
             timestamp: ts,
             mined_at: format_datetime(ts),
@@ -296,53 +296,65 @@ impl Block {
         Self::genesis_mined_for(network).expect("genesis mining failed")
     }
 
-    fn genesis_mined_for(network: Network) -> Result<Self, String> {
-        let ts = network.genesis_timestamp();
-        let coinbase_txid = blockchain::genesis_coinbase_txid_for(network);
-        let genesis_output_script = genesis::GENESIS_OUTPUT_SCRIPT.to_string();
-        let nbits = network.genesis_nbits();
+    // GENESIS-BEGIN
+    // Everything between GENESIS-BEGIN and GENESIS-END may only use the
+    // genesis parameters of `consensus::genesis`. It must never read a rule
+    // parameter (`rules::...`): rule changes are scheduled by activation
+    // height and must not be able to change the genesis block.
 
+    /// The genesis block of `network` without nonce and hash (all fields are
+    /// derived from the immutable genesis parameters only).
+    pub fn genesis_unmined_for(network: Network) -> Self {
+        Self::genesis_from_params(&genesis::GenesisParams::for_network(network))
+    }
+
+    /// Build an unmined genesis block from explicit genesis parameters.
+    /// Used by `genesis_unmined_for` and by the tests that prove which
+    /// parameters change the genesis hash.
+    pub fn genesis_from_params(params: &genesis::GenesisParams) -> Self {
+        // The genesis commitment replaces the former coinbase txid seed: it is
+        // derived from genesis parameters only.
+        let coinbase_txid = params.commitment();
+        // The two genesis transactions carry the genesis message and secret.
         let transactions = vec![
-            Transaction::coinbase(genesis::GENESIS_MESSAGE.into()),
-            Transaction::secret(genesis::GENESIS_SECRET.into()),
+            Transaction::coinbase(params.message.clone()),
+            Transaction::secret(params.secret.clone()),
         ];
         let merkle_root = Self::compute_merkle_root(&transactions);
-
-        let size = (genesis_output_script.len()
+        // Serialized size estimate of the header strings plus a fixed padding.
+        let size = (params.output_script.len()
             + merkle_root.len()
             + coinbase_txid.len()
-            + transactions.iter().map(|t| t.txid.len()).sum::<usize>()
-            + 256) as u64;
-
-        let subsidy = crate::consensus::spec::INITIAL_REWARD;
-        let total_fees = 0;
-
-        let block_work = Self::compute_work(nbits);
-
-        let mut b = Block {
-            nversion: rules::BLOCK_VERSION,
+            + transactions.iter().map(|t| t.txid.len()).sum::<usize>()) as u64
+            + genesis::GENESIS_SIZE_PADDING;
+        Block {
+            nversion: genesis::GENESIS_BLOCK_VERSION,
             index: 0,
-            timestamp: ts,
-            mined_at: format_datetime(ts),
-            mined_for: "GENESIS".to_string(),
-            previous_hash: "0".repeat(64),
+            timestamp: params.timestamp,
+            mined_at: params.mined_at.clone(),
+            mined_for: genesis::GENESIS_MINED_FOR.to_string(),
+            previous_hash: genesis::GENESIS_PREVIOUS_HASH.to_string(),
             merkle_root,
             hash: String::new(),
             nonce: 0,
-            nbits,
-            reward: subsidy,
-            subsidy,
-            total_fees,
+            nbits: params.nbits,
+            reward: params.initial_reward,
+            subsidy: params.initial_reward,
+            total_fees: 0,
             coinbase_txid,
             blockchain_size: size,
-            genesis_output_script,
+            genesis_output_script: params.output_script.clone(),
             miner_pubkey: String::new(),
             miner_signature: String::new(),
-            chainwork: block_work,
+            chainwork: params.chainwork,
             transactions,
             state_root: String::new(),
-        };
+        }
+    }
 
+    fn genesis_mined_for(network: Network) -> Result<Self, String> {
+        let mut b = Self::genesis_unmined_for(network);
+        let nbits = b.nbits;
         if !pow::mine(&mut b, nbits) {
             return Err("genesis mining failed: nonce exhausted".to_string());
         }
@@ -403,55 +415,12 @@ impl Block {
 
     #[cfg(feature = "skip-pow")]
     fn genesis_precomputed_for(network: Network) -> Self {
-        let ts = network.genesis_timestamp();
-        let coinbase_txid = blockchain::genesis_coinbase_txid_for(network);
-        let genesis_output_script = genesis::GENESIS_OUTPUT_SCRIPT.to_string();
-        let nbits = network.genesis_nbits();
-
-        let transactions = vec![
-            Transaction::coinbase(genesis::GENESIS_MESSAGE.into()),
-            Transaction::secret(genesis::GENESIS_SECRET.into()),
-        ];
-
-        let merkle_root = genesis::expected_genesis_merkle_root_for(network).to_string();
-        let hash = genesis::expected_genesis_hash_for(network).to_string();
-        let nonce = genesis::expected_genesis_nonce_for(network);
-
-        let size = (genesis_output_script.len()
-            + merkle_root.len()
-            + coinbase_txid.len()
-            + transactions.iter().map(|t| t.txid.len()).sum::<usize>()
-            + 256) as u64;
-
-        let subsidy = crate::consensus::spec::INITIAL_REWARD;
-        let total_fees = 0;
-
-        let block_work = Self::compute_work(nbits);
-
-        Block {
-            nversion: rules::BLOCK_VERSION,
-            index: 0,
-            timestamp: ts,
-            mined_at: format_datetime(ts),
-            mined_for: "GENESIS".to_string(),
-            previous_hash: "0".repeat(64),
-            merkle_root,
-            hash,
-            nonce,
-            nbits,
-            reward: subsidy,
-            subsidy,
-            total_fees,
-            coinbase_txid,
-            blockchain_size: size,
-            genesis_output_script,
-            miner_pubkey: String::new(),
-            miner_signature: String::new(),
-            chainwork: block_work,
-            transactions,
-            state_root: String::new(),
-        }
+        let mut b = Self::genesis_unmined_for(network);
+        b.nonce = genesis::expected_genesis_nonce_for(network);
+        b.hash = genesis::expected_genesis_hash_for(network).to_string();
+        b
     }
+    // GENESIS-END
 
     pub fn calculate_hash(&self) -> String {
         let mut payload = Vec::new();

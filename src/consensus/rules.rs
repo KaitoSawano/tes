@@ -41,9 +41,187 @@ pub const MAX_MESSAGE_LEN: usize = 512;
 /// pay a real fee for the on-chain space.
 pub const MIN_MESSAGE_AMOUNT: u64 = 1;
 
-// Helper function to return the maximum number of transactions per block.
+// Helper function to return the BASE maximum number of transactions per block.
+// Height-aware code must use `max_tx_per_block_at`.
 pub fn max_tx_per_block() -> usize {
     MAX_TX_PER_BLOCK // Return the constant value.
+}
+
+// ----------------------------------------------------------------------
+// Rule schedule: how rule parameters change WITHOUT touching the genesis block
+// ----------------------------------------------------------------------
+//
+// The constants above are the BASE rules: they apply from block 1 and must
+// never be edited after launch. A change of a rule parameter is made by adding
+// a `RuleEra` to the schedule of the network. The era is valid from its
+// `activation_height` on, so older blocks keep being validated with the rules
+// they were created under, and the genesis block is never involved.
+//
+// Process: announce the change, publish a release that contains the new era
+// with an activation height far enough in the future, wait until the network
+// has upgraded, then the height is reached. Nodes that did not upgrade reject
+// the first block that follows the new rules and stay on the old rules (they
+// can only follow the majority again after installing the new release).
+
+/// Rule parameters that can change over time (always through an era).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuleSet {
+    /// Maximum number of transactions in a block.
+    pub max_tx_per_block: usize,
+    /// Blocks a coinbase reward must mature before it can be spent.
+    pub coinbase_maturity: u64,
+    /// Maximum length of a transaction note in bytes.
+    pub max_note_len: usize,
+    /// Version of newly created blocks.
+    pub block_version: u32,
+}
+
+/// The base rules, valid from block 1 until the first era.
+pub const BASE_RULES: RuleSet = RuleSet {
+    max_tx_per_block: MAX_TX_PER_BLOCK,
+    coinbase_maturity: COINBASE_MATURITY,
+    max_note_len: MAX_NOTE_LEN,
+    block_version: BLOCK_VERSION,
+};
+
+/// A rule change that takes effect at `activation_height`.
+#[derive(Clone, Copy, Debug)]
+pub struct RuleEra {
+    /// First block that must follow `rules` (never 0: block 0 is the genesis).
+    pub activation_height: u64,
+    /// The complete rule set from that height on.
+    pub rules: RuleSet,
+}
+
+/// Mainnet schedule (empty: the base rules apply).
+pub const MAIN_RULE_SCHEDULE: &[RuleEra] = &[];
+/// Testnet schedule.
+pub const TEST_RULE_SCHEDULE: &[RuleEra] = &[];
+/// Regtest schedule.
+pub const REGTEST_RULE_SCHEDULE: &[RuleEra] = &[];
+
+/// Schedule of the running network.
+pub fn rule_schedule() -> &'static [RuleEra] {
+    use crate::consensus::spec::{self, Network};
+    match spec::current_network() {
+        Network::Main => MAIN_RULE_SCHEDULE,
+        Network::Test => TEST_RULE_SCHEDULE,
+        Network::Regtest => REGTEST_RULE_SCHEDULE,
+    }
+}
+
+/// Rule set that applies at `height` according to `schedule`.
+pub fn rules_in(schedule: &[RuleEra], height: u64) -> RuleSet {
+    let mut current = BASE_RULES; // before the first era
+    for era in schedule {
+        if era.activation_height <= height {
+            current = era.rules; // the last era that has activated wins
+        } else {
+            break; // the schedule is sorted, later eras are not active yet
+        }
+    }
+    current
+}
+
+/// Rule set that applies at `height` on the running network.
+pub fn rules_at(height: u64) -> RuleSet {
+    rules_in(rule_schedule(), height)
+}
+
+/// The newest rules (what a new transaction or block must follow now).
+pub fn rules_latest() -> RuleSet {
+    rules_at(u64::MAX)
+}
+
+/// Maximum transactions per block at `height`.
+pub fn max_tx_per_block_at(height: u64) -> usize {
+    rules_at(height).max_tx_per_block
+}
+
+/// Coinbase maturity at `height`.
+pub fn coinbase_maturity_at(height: u64) -> u64 {
+    rules_at(height).coinbase_maturity
+}
+
+/// Maximum note length at `height`.
+pub fn max_note_len_at(height: u64) -> usize {
+    rules_at(height).max_note_len
+}
+
+/// Maximum note length of the newest rules.
+pub fn max_note_len_latest() -> usize {
+    rules_latest().max_note_len
+}
+
+/// Version a block at `height` must carry. The genesis block has its own frozen
+/// version (`genesis::GENESIS_BLOCK_VERSION`).
+pub fn block_version_at(height: u64) -> u32 {
+    if height == 0 {
+        crate::consensus::genesis::GENESIS_BLOCK_VERSION
+    } else {
+        rules_at(height).block_version
+    }
+}
+
+/// Check a schedule: activation heights above 0 and strictly increasing,
+/// every rule value usable.
+pub fn validate_schedule_in(schedule: &[RuleEra]) -> Result<(), String> {
+    let mut previous: Option<u64> = None;
+    for era in schedule {
+        if era.activation_height == 0 {
+            return Err("a rule era cannot activate at height 0 (the genesis block)".to_string());
+        }
+        if let Some(p) = previous {
+            if era.activation_height <= p {
+                return Err(format!(
+                    "rule era at {} is not above the previous era at {}",
+                    era.activation_height, p
+                ));
+            }
+        }
+        let r = era.rules;
+        if r.max_tx_per_block == 0 || r.max_note_len == 0 || r.block_version == 0 {
+            return Err(format!("rule era at {} has an unusable value", era.activation_height));
+        }
+        previous = Some(era.activation_height);
+    }
+    Ok(())
+}
+
+/// Check the schedules of all networks (called at node start).
+pub fn validate_schedule() -> Result<(), String> {
+    validate_schedule_in(MAIN_RULE_SCHEDULE)?;
+    validate_schedule_in(TEST_RULE_SCHEDULE)?;
+    validate_schedule_in(REGTEST_RULE_SCHEDULE)
+}
+
+/// Text form of the base rules and the schedule of `network` (informational
+/// fingerprint only; it never enters the genesis block).
+pub fn schedule_fingerprint_for(network: crate::consensus::spec::Network) -> String {
+    use crate::consensus::spec::Network;
+    let schedule = match network {
+        Network::Main => MAIN_RULE_SCHEDULE,
+        Network::Test => TEST_RULE_SCHEDULE,
+        Network::Regtest => REGTEST_RULE_SCHEDULE,
+    };
+    let mut parts: Vec<String> = vec![format!(
+        "base:{}:{}:{}:{}",
+        BASE_RULES.max_tx_per_block,
+        BASE_RULES.coinbase_maturity,
+        BASE_RULES.max_note_len,
+        BASE_RULES.block_version
+    )];
+    for era in schedule {
+        parts.push(format!(
+            "{}:{}:{}:{}:{}",
+            era.activation_height,
+            era.rules.max_tx_per_block,
+            era.rules.coinbase_maturity,
+            era.rules.max_note_len,
+            era.rules.block_version
+        ));
+    }
+    parts.join(",")
 }
 
 // ----------------------------------------------------------------------
@@ -62,11 +240,13 @@ pub const STATE_ROOT_ACTIVATION_REGTEST: u64 = 1;
 
 pub fn state_root_activation_height() -> u64 {
     use crate::consensus::spec::{self, Network};
+    // Never 0: an activation must not change how the genesis block is hashed.
     match spec::current_network() {
         Network::Main => STATE_ROOT_ACTIVATION_MAIN,
         Network::Test => STATE_ROOT_ACTIVATION_TEST,
         Network::Regtest => STATE_ROOT_ACTIVATION_REGTEST,
     }
+    .max(1)
 }
 
 /// True when a block at `height` must carry a valid `state_root`.
@@ -101,7 +281,7 @@ pub fn xephash_activation_height() -> u64 {
         Network::Test => XEPHASH_ACTIVATION_TEST,
         Network::Regtest => XEPHASH_ACTIVATION_REGTEST,
     };
-    own.max(state_root_activation_height())
+    own.max(state_root_activation_height()).max(1)
 }
 
 /// True when a block at `height` must satisfy Xephash.

@@ -13,6 +13,9 @@ use crate::blockchain;
 use crate::consensus::spec::Network;
 use xepay_crypto::sha3_256_hex;
 
+/// Informational fingerprint of ALL parameters of this build (genesis and
+/// rules). It is shown by `getblockchaininfo` to compare two builds. It is NOT
+/// used by consensus and does not influence the genesis block.
 pub fn consensus_fingerprint_for(network: Network) -> String {
     let softfork_fingerprint: String = blockchain::SOFT_FORK_DEPLOYMENTS
         .iter()
@@ -53,6 +56,12 @@ pub fn consensus_fingerprint_for(network: Network) -> String {
         rules::ZERO_HASH,
         softfork_fingerprint,
     );
+    let payload = format!(
+        "{}|{}|{}",
+        payload,
+        genesis::genesis_commitment_for(network),
+        rules::schedule_fingerprint_for(network)
+    );
     sha3_256_hex(payload.as_bytes())
 }
 
@@ -68,15 +77,12 @@ pub fn parameter_fingerprint() -> String {
     consensus_fingerprint_for(spec::current_network())
 }
 
+/// The `coinbase_txid` of the genesis block: the commitment over the genesis
+/// parameters ONLY. Rule parameters are deliberately not part of it (they used
+/// to be, through the consensus fingerprint, which tied the genesis hash to
+/// every rule value).
 pub fn genesis_coinbase_txid_for(network: Network) -> String {
-    let fp = parameter_fingerprint_for(network);
-    let payload = format!(
-        "genesis|{}|{}|{}",
-        fp,
-        network.genesis_timestamp(),
-        network.genesis_nbits()
-    );
-    sha3_256_hex(payload.as_bytes())
+    genesis::genesis_commitment_for(network)
 }
 
 pub fn genesis_coinbase_txid() -> String {

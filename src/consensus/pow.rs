@@ -16,8 +16,10 @@ pub const POW_LIMIT_MAIN: &str = "00000fffffffffffffffffffffffffffffffffffffffff
 pub const POW_LIMIT_REGTEST: &str =
     "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
+/// Genesis difficulty of the RUNNING network (it used to return the mainnet
+/// value on every network, which disagreed with the other genesis code).
 pub fn genesis_nbits() -> u32 {
-    GENESIS_NBITS
+    crate::consensus::spec::current_network().genesis_nbits()
 }
 
 pub fn pow_limit() -> &'static str {

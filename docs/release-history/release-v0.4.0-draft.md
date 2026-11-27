@@ -3,6 +3,7 @@
 Hard fork. Activation heights are set in `src/consensus/rules.rs`; every node must upgrade before them.
 
 ### New
+- **Immutable genesis, scheduled rules:** the genesis hash now depends on genesis parameters only. Rule parameters change through activation heights (`RuleEra`) and never touch the genesis block. This release carries the LAST genesis reset: all networks get the new genesis once (data directories must be recreated); after that the genesis never changes.
 - **Xephash proof of work** (memory-hard, SHA3-256 based) with a light verification mode, a multi-threaded miner and the stand-alone `xephash` tool.
 - **Difficulty retarget every 15 hours** (3,600 blocks), limited to 0.25x .. 4x per window.
 - **State root** in every block header (Merkle Patricia Trie) with atomic commits and crash recovery.

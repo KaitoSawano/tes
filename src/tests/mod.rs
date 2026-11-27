@@ -21,4 +21,5 @@ mod state_root_test;
 mod fee_market_test;
 mod candidate_block_test;
 mod xephash_integration_test;
+mod genesis_immutability_test;
 mod validation_test;

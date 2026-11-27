@@ -63,7 +63,7 @@ fn apply_tx_to_account(
     nonce: u64,
     current_height: u64,
 ) -> Result<(), String> {
-    let maturity = rules::COINBASE_MATURITY;
+    let maturity = rules::coinbase_maturity_at(current_height);
 
     settle_maturity(from_acc, current_height, maturity)?;
 
@@ -538,7 +538,7 @@ impl StateDB {
     pub fn mature_balance_at(&self, address: &str, current_height: u64) -> u64 {
         match self.get_account(address) {
             Ok(Some(acc)) => {
-                let maturity = crate::consensus::rules::COINBASE_MATURITY;
+                let maturity = crate::consensus::rules::coinbase_maturity_at(current_height);
                 let mut mature = acc.balance;
                 for (height, amount) in &acc.immature_rewards {
                     if current_height >= height.saturating_add(maturity) {
@@ -563,7 +563,7 @@ impl StateDB {
     pub fn immature_balance_of(&self, address: &str, current_height: u64) -> u64 {
         match self.get_account(address) {
             Ok(Some(acc)) => {
-                let maturity = crate::consensus::rules::COINBASE_MATURITY;
+                let maturity = crate::consensus::rules::coinbase_maturity_at(current_height);
                 acc.immature_rewards
                     .iter()
                     .filter(|(height, _)| current_height < height.saturating_add(maturity))
@@ -671,7 +671,7 @@ impl StateDB {
         block_height: u64,
     ) -> Result<(), String> {
         let mut acc = self.get_account(miner)?.unwrap_or_else(empty_account);
-        settle_maturity(&mut acc, block_height, rules::COINBASE_MATURITY)?;
+        settle_maturity(&mut acc, block_height, rules::coinbase_maturity_at(block_height))?;
         credit_reward_to_account(&mut acc, reward, block_height)?;
         self.update_account(miner, &acc)
     }
