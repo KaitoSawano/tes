@@ -192,6 +192,8 @@ pub const DATADIR_NAME_MAIN: &str = ".xepay";
 
 // HARD FORK: New genesis timestamp (2026-11-15 00:00:00 UTC).
 pub const GENESIS_TIMESTAMP_MAIN: u128 = 1794733780684;
+// Genesis difficulty (compact nbits) of the mainnet.
+pub const GENESIS_NBITS_MAIN: u32 = 0x1e0ffff0;
 
 // ----------------------------------------------------------------------
 // Testnet parameters
@@ -202,6 +204,8 @@ pub const DEFAULT_PORT_TEST: u16 = 12255;
 pub const DEFAULT_RPC_PORT_TEST: u16 = 12254;
 pub const DATADIR_NAME_TEST: &str = ".xepay-testnet";
 pub const GENESIS_TIMESTAMP_TEST: u128 = 1794733932120;
+// Genesis difficulty (compact nbits) of the testnet.
+pub const GENESIS_NBITS_TEST: u32 = 0x1e0ffff0;
 
 // ----------------------------------------------------------------------
 // Regtest parameters
@@ -212,6 +216,8 @@ pub const DEFAULT_PORT_REGTEST: u16 = 18444;
 pub const DEFAULT_RPC_PORT_REGTEST: u16 = 18443;
 pub const DATADIR_NAME_REGTEST: &str = ".xepay-regtest";
 pub const GENESIS_TIMESTAMP_REGTEST: u128 = 1794734004433;
+// Genesis difficulty (compact nbits) of regtest (trivial, for local development).
+pub const GENESIS_NBITS_REGTEST: u32 = 0x207fffff;
 
 // ----------------------------------------------------------------------
 // Legacy accessors

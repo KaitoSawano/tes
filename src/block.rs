@@ -4,7 +4,7 @@
 
 //! Block structure and related operations.
 
-use crate::blockchain::{self, Blockchain};
+use crate::blockchain::Blockchain;
 use crate::consensus::spec::{self, Network};
 use crate::consensus::{genesis, rules};
 use crate::datadir;
