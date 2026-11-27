@@ -7,6 +7,10 @@
 //! Integers are encoded in little-endian byte order, array and string
 //! lengths use a varint encoding, and hashes are encoded as 32 raw bytes.
 
+// This file is a standalone copy of the wire format used only by the tests;
+// not every helper is called here, so silence the dead-code warnings.
+#![allow(dead_code)]
+
 use xepay::block::Block;
 use xepay::transaction::Transaction;
 use serde::{Deserialize, Serialize};

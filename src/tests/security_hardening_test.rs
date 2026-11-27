@@ -179,9 +179,17 @@ fn reorg_with_missing_state_root_is_rejected() {
             result.is_err(),
             "reorg with missing state root must be rejected"
         );
+        // The forged block2 (chainwork set to u128::MAX by hand, no valid
+        // proof of work) is now rejected by the full validation that runs
+        // before any rollback, or by the ancestor state-root check. Either
+        // way the error must say that the reorg was rejected.
+        let err = result.unwrap_err();
         assert!(
-            result.unwrap_err().contains("state root"),
-            "error must mention state root"
+            err.contains("rejected") || err.contains("state root"),
+            "reorg must be rejected, got: {}",
+            err
         );
+        // The live chain must be untouched (still genesis + block1).
+        assert_eq!(chain.chain.len(), 2, "a rejected reorg must not change the chain");
     });
 }
