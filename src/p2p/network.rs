@@ -19,7 +19,7 @@ use crate::p2p::addr_book::AddrBook;
 use crate::p2p::anchors::{self, Anchor, MAX_BLOCK_RELAY_ONLY_ANCHORS};
 use crate::p2p::banman::BanMan;
 use crate::p2p::dns_seed;
-use crate::p2p::framing::{read_message, write_message};
+use crate::p2p::framing::{read_message, write_message, HEADER_LEN, MAX_PAYLOAD_LEN};
 use crate::p2p::handshake;
 use crate::p2p::inv::InventoryManager;
 use crate::p2p::message::{BlockLocator, InvType, Inventory, Message};
@@ -40,12 +40,35 @@ const MAX_HEADER_CHAIN: usize = 400_000;
 const RATE_LIMIT_WINDOW_SECS: u64 = 1;
 
 /// Base timeout before considering a block download peer unresponsive.
-/// This mirrors the reference node's BLOCK_STALLING_TIMEOUT of 2 seconds.
-const BASE_BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(2);
+/// FIX (sync stall): the base value is now 20 seconds instead of 2. With 2
+/// seconds a node that was still receiving a large message (or whose peer was
+/// busy mining/saving) was declared "stalling" over and over and never synced.
+const BASE_BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Maximum stalling timeout after repeated stalling disconnects.
-/// This mirrors the reference node's adaptive cap of 64 seconds.
-const MAX_BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(64);
+/// Maximum stalling timeout after repeated stalls (the timeout doubles on each one).
+const MAX_BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// FIX (sync stall): size of one socket read. It used to be 4096 bytes per
+/// pass of the main loop (about 80 KB/s), so a headers message of a few MB
+/// took minutes to arrive and blocked every block behind it.
+const READ_CHUNK: usize = 64 * 1024;
+
+/// FIX (sync stall): upper bound of bytes read from one peer in one pass, so
+/// a single busy peer cannot starve the other connections.
+const MAX_READ_PER_PASS: usize = 4 * 1024 * 1024;
+
+/// FIX (sync stall): minimum time between two automatic `getheaders`
+/// requests to the same peer while the header chain is still empty. It used
+/// to be re-sent on every 500 ms tick, so the peer answered the same
+/// thousands of headers again and again (the repeated "received N headers"
+/// lines) and those answers queued up in front of the block data.
+const HEADERS_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+
+/// FIX (sync stall): soft limit for the size of one `headers` response. The
+/// headers carry the miner public key and signature, so 2000 headers can be
+/// larger than the 16 MB write buffer. The limit keeps every response small
+/// enough; the requester simply asks again from the last header it got.
+const MAX_HEADERS_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
 
 /// Validation error codes that indicate a state mismatch rather than
 /// misbehavior. A block that fails one of these checks is dropped but
@@ -146,9 +169,12 @@ pub struct Network {
     block_relay_peers: Vec<SocketAddr>,
     sync_state: SyncState,
     header_chain: Vec<Block>,
-    /// Adaptive stalling timeout. Doubled on each stalling disconnect,
+    /// Adaptive stalling timeout. Doubled on each stall,
     /// halved back to the base value whenever a block is accepted.
     stalling_timeout: Duration,
+    /// FIX (sync stall): when the last `getheaders` was sent to each peer.
+    /// Used to avoid sending the same request on every tick.
+    headers_requested_at: HashMap<u64, Instant>,
 }
 
 impl Network {
@@ -204,6 +230,7 @@ impl Network {
             sync_state: SyncState::new(),
             header_chain: Vec::new(),
             stalling_timeout: BASE_BLOCK_STALLING_TIMEOUT,
+            headers_requested_at: HashMap::new(),
         }
     }
 
@@ -424,6 +451,11 @@ impl Network {
                 peer_id
             );
             self.sync_state.give_up_on_stalling_peer(peer_id);
+            // FIX (sync stall): the comment above `stalling_timeout` says it
+            // doubles on every stall, but that only happened on a disconnect
+            // (which never occurs now). Double it here, capped at the maximum.
+            let doubled = self.stalling_timeout * 2;
+            self.stalling_timeout = doubled.min(MAX_BLOCK_STALLING_TIMEOUT);
         }
 
         // If the local header chain is empty, request headers from every
@@ -441,7 +473,15 @@ impl Network {
                 .map(|p| p.id)
                 .collect();
             for id in connected {
-                self.send_getheaders(id).await;
+                // FIX (sync stall): do not repeat the request while the
+                // answer to the previous one may still be on its way.
+                let due = match self.headers_requested_at.get(&id) {
+                    Some(t) => t.elapsed() >= HEADERS_RETRY_INTERVAL,
+                    None => true,
+                };
+                if due {
+                    self.send_getheaders(id).await;
+                }
             }
         } else {
             self.request_blocks_from_peers().await;
@@ -512,23 +552,36 @@ impl Network {
                     continue;
                 }
 
-                let header = match self.header_at_height(height) {
-                    Some(h) => h,
+                // FIX (sync stall): only the hash is needed here. Cloning the
+                // whole header (with its signature) for up to 1024 heights on
+                // every call was a lot of wasted work.
+                let header_hash = match self.header_ref_at_height(height) {
+                    Some(h) => h.hash.clone(),
                     None => continue,
                 };
 
-                if self.sync_state.blocks_requested.contains(&header.hash) {
+                if self.sync_state.blocks_requested.contains(&header_hash) {
                     continue;
                 }
 
-                if self.sync_state.blocks_received.contains(&header.hash) {
-                    continue;
+                if self.sync_state.blocks_received.contains(&header_hash) {
+                    // FIX (sync stall): a block that is marked as received but
+                    // is neither in the orphan pool nor in the side chain pool
+                    // was dropped (for example pruned from the orphan pool).
+                    // It must be downloaded again instead of being skipped
+                    // forever.
+                    if self.sync_state.orphan_pool.contains_key(&header_hash)
+                        || self.sync_state.side_chain_pool.contains_key(&header_hash)
+                    {
+                        continue;
+                    }
+                    self.sync_state.blocks_received.remove(&header_hash);
                 }
 
-                if self.sync_state.request_block(*peer_id, &header.hash) {
+                if self.sync_state.request_block(*peer_id, &header_hash) {
                     peer_requests.push(Inventory {
                         inv_type: InvType::Block,
-                        hash: header.hash.clone(),
+                        hash: header_hash.clone(),
                     });
                 }
             }
@@ -543,11 +596,18 @@ impl Network {
         }
     }
 
-    fn header_at_height(&self, height: u64) -> Option<Block> {
+    /// FIX (sync stall): `header_chain` is kept sorted by index with one
+    /// header per height, so a binary search replaces the linear scan.
+    fn header_ref_at_height(&self, height: u64) -> Option<&Block> {
         self.header_chain
-            .iter()
-            .find(|b| b.index == height)
-            .cloned()
+            .binary_search_by(|b| b.index.cmp(&height))
+            .ok()
+            .map(|i| &self.header_chain[i])
+    }
+
+    #[allow(dead_code)]
+    fn header_at_height(&self, height: u64) -> Option<Block> {
+        self.header_ref_at_height(height).cloned()
     }
 
     async fn try_connect(&mut self) {
@@ -843,7 +903,8 @@ impl Network {
                 None => return,
             };
 
-            let mut buf = [0u8; 4096];
+            // FIX (sync stall): 64 KB buffer on the heap instead of 4 KB.
+            let mut buf = vec![0u8; READ_CHUNK];
             let read_fut = conn.stream.read(&mut buf);
             let read_result = tokio::time::timeout(Duration::from_millis(100), read_fut).await;
 
@@ -851,7 +912,23 @@ impl Network {
                 Ok(Ok(0)) => (Err("peer closed the connection".to_string()), false),
                 Ok(Ok(n)) => {
                     conn.read_buf.extend_from_slice(&buf[..n]);
-                    (Ok(n), !conn.write_buf.is_empty())
+                    // FIX (sync stall): keep reading whatever is already
+                    // waiting in the socket without sleeping, so a large
+                    // message is received in one pass of the main loop.
+                    let mut total = n;
+                    while total < MAX_READ_PER_PASS {
+                        match conn.stream.try_read(&mut buf) {
+                            // Closed: the next blocking read reports it.
+                            Ok(0) => break,
+                            Ok(m) => {
+                                conn.read_buf.extend_from_slice(&buf[..m]);
+                                total += m;
+                            }
+                            // WouldBlock (nothing more to read) or any other error.
+                            Err(_) => break,
+                        }
+                    }
+                    (Ok(total), !conn.write_buf.is_empty())
                 }
                 Ok(Err(e)) => (Err(format!("read error: {}", e)), false),
                 Err(_) => (Ok(0), !conn.write_buf.is_empty()),
@@ -860,6 +937,12 @@ impl Network {
 
         match read_result {
             Ok(n) if n > 0 => {
+                // FIX (sync stall): bytes arrived, so the peer is alive and
+                // busy delivering data. Reset its silence timers.
+                self.sync_state.note_peer_activity(id);
+                if let Some(peer) = self.peer_manager.get_mut(id) {
+                    peer.last_recv = Instant::now();
+                }
                 self.drain_read_buffer(id).await;
             }
             Ok(_) => {}
@@ -897,6 +980,31 @@ impl Network {
                     None => return,
                 };
                 if conn.read_buf.is_empty() {
+                    return;
+                }
+                // FIX (sync stall): do not try to parse a frame that has not
+                // fully arrived. `read_message` copies the whole partial
+                // payload on every attempt, which made receiving a large
+                // message quadratic in its size.
+                if conn.read_buf.len() < HEADER_LEN {
+                    return;
+                }
+                let declared_len = u32::from_le_bytes([
+                    conn.read_buf[16],
+                    conn.read_buf[17],
+                    conn.read_buf[18],
+                    conn.read_buf[19],
+                ]) as usize;
+                // A wrong network magic is left to `read_message`, which rejects it
+                // right away. Otherwise a garbage stream could make us wait for
+                // up to MAX_PAYLOAD_LEN bytes before it is noticed.
+                let expected_magic = crate::consensus::spec::current_network().magic();
+                let magic_ok = &conn.read_buf[0..4] == expected_magic;
+                // An oversized length is left to `read_message`, which rejects it.
+                if magic_ok
+                    && declared_len <= MAX_PAYLOAD_LEN
+                    && conn.read_buf.len() < HEADER_LEN + declared_len
+                {
                     return;
                 }
                 let mut cursor = std::io::Cursor::new(&conn.read_buf);
@@ -1244,6 +1352,10 @@ impl Network {
             return;
         }
 
+        // FIX (sync stall): an answer arrived, so the outstanding getheaders
+        // request of this peer is done.
+        self.headers_requested_at.remove(&id);
+
         if headers.len() > MAX_HEADERS_RESULTS as usize {
             // Too many headers in one message is a protocol violation.
             // The batch is dropped and the peer is not punished, which
@@ -1318,10 +1430,16 @@ impl Network {
         }
         self.sync_state.best_known_height = self.sync_state.best_known_height.max(last_index);
 
-        let added = headers.len();
+        // FIX (sync stall): count only the headers that are really new and
+        // look them up in a hash set instead of scanning the whole header
+        // chain for every header (quadratic).
+        let mut known_hashes: HashSet<String> =
+            self.header_chain.iter().map(|b| b.hash.clone()).collect();
+        let mut added = 0usize;
         for h in headers {
-            if !self.header_chain.iter().any(|b| b.hash == h.hash) {
+            if known_hashes.insert(h.hash.clone()) {
                 self.header_chain.push(h);
+                added += 1;
             }
         }
 
@@ -1330,16 +1448,23 @@ impl Network {
             .sort_by(|a, b| a.index.cmp(&b.index).then(b.chainwork.cmp(&a.chainwork)));
         self.header_chain.dedup_by_key(|b| b.index);
 
-        println!(
-            "[p2p] received {} headers from {} (best_known_height={})",
-            added, id, self.sync_state.best_known_height
-        );
+        // FIX (sync stall): stay quiet when the peer only repeated headers
+        // we already have.
+        if added > 0 {
+            println!(
+                "[p2p] received {} headers from {} (best_known_height={})",
+                added, id, self.sync_state.best_known_height
+            );
+        }
 
         // Request headers again if the peer has more blocks than the
         // batch we just received, then request the blocks that are
         // covered by the header chain. This is the loop that drives the
         // initial sync: headers first, blocks second.
-        if last_index > self.chain.read().await.height() {
+        // FIX (sync stall): ask for more only when this answer brought at
+        // least one new header. A repeated answer used to trigger another
+        // request, which produced an endless getheaders/headers loop.
+        if added > 0 && last_index > self.chain.read().await.height() {
             self.send_getheaders(id).await;
         }
         self.request_blocks_from_peers().await;
@@ -1365,7 +1490,21 @@ impl Network {
                 .unwrap_or(false)
         };
 
-        if !is_requested && !is_tip_extension {
+        // FIX (sync stall): a block that arrives after its request was given
+        // up used to be ignored (it was no longer "requested"), so the work
+        // of downloading it was thrown away and it had to be asked for again.
+        // A block whose hash equals a validated header inside the download
+        // window is accepted; its body is still fully validated below.
+        let is_known_header = {
+            let chain = self.chain.read().await;
+            self.sync_state.is_in_window(height, &chain)
+                && self
+                    .header_ref_at_height(height)
+                    .map(|h| h.hash == hash)
+                    .unwrap_or(false)
+        };
+
+        if !is_requested && !is_tip_extension && !is_known_header {
             if orphan_debug_enabled() {
                 println!(
                     "[p2p] block {} from {} ignored (not requested and not a tip extension)",
@@ -1504,6 +1643,7 @@ impl Network {
 
     async fn disconnect(&mut self, id: u64, reason: &str) {
         self.sync_state.remove_peer(id);
+        self.headers_requested_at.remove(&id);
         if let Some(mut conn) = self.connections.remove(&id) {
             let _ = conn.stream.shutdown().await;
             if let Some(idx) = self.block_relay_peers.iter().position(|a| *a == conn.addr) {
@@ -1573,6 +1713,8 @@ impl Network {
     }
 
     async fn send_getheaders(&mut self, id: u64) {
+        // FIX (sync stall): remember when the request was sent (see on_tick).
+        self.headers_requested_at.insert(id, Instant::now());
         let chain = self.chain.read().await;
         let mut locator = build_locator(&chain);
         // Include the header chain in the locator so that the peer can
@@ -1670,14 +1812,22 @@ fn build_headers_response(chain: &Blockchain, loc: &BlockLocator) -> Vec<Block> 
         }
     }
     let end = (start + MAX_HEADERS_RESULTS).min(chain.chain.len() as u64);
-    chain.chain[start as usize..end as usize]
-        .iter()
-        .map(|b| {
-            let mut hb = b.clone();
-            hb.transactions.clear();
-            hb
-        })
-        .collect()
+    // FIX (sync stall): stop adding headers once the response would be larger
+    // than MAX_HEADERS_RESPONSE_BYTES (the miner key and signature make each
+    // header several KB). At least one header is always returned.
+    let mut out: Vec<Block> = Vec::new();
+    let mut approx_bytes = 0usize;
+    for b in chain.chain[start as usize..end as usize].iter() {
+        let approx = b.miner_pubkey.len() + b.miner_signature.len() + b.state_root.len() + 1024;
+        if !out.is_empty() && approx_bytes + approx > MAX_HEADERS_RESPONSE_BYTES {
+            break;
+        }
+        approx_bytes += approx;
+        let mut hb = b.clone();
+        hb.transactions.clear();
+        out.push(hb);
+    }
+    out
 }
 
 pub fn spawn(

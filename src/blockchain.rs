@@ -2,8 +2,6 @@
 // Distributed under the Apache License, see the accompanying
 // file LICENSE or https://www.apache.org/licenses/LICENSE-2.0.
 
-//! Blockchain state and consensus-related operations.
-
 use std::collections::BTreeMap;
 
 use crate::block::Block;

@@ -2,8 +2,6 @@
 // Distributed under the Apache License, see the accompanying
 // file LICENSE or https://www.apache.org/licenses/LICENSE-2.0.
 
-//! RPC server and client for XEPAY.
-
 use crate::blockchain::{self, Blockchain};
 use crate::config::Config;
 use crate::consensus;

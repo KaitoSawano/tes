@@ -33,6 +33,22 @@ makes the node ask for the missing headers with `getheaders`.
 
 Reorganizations never go below the highest checkpoint that is already in the chain.
 
+### Stall handling during sync
+
+- A `headers` response is also limited to about 6 MiB; the requester continues from the last header it
+  received, so a response can contain fewer than 2,000 headers.
+- `getheaders` is not repeated automatically while an answer is still outstanding (minimum 15 seconds
+  between automatic retries to the same peer). A repeated answer that adds no new header does not trigger
+  another request.
+- A peer is "stalling" only when no bytes at all were read from it for the stalling timeout (20 seconds at
+  the start, doubled on each stall up to 120 seconds), or when it delivered no block for 60 seconds. The
+  timer starts when the request is made.
+- A stalling peer is not disconnected. Its in-flight requests are dropped and the same blocks are asked for
+  again after a short cooldown (5 seconds). A block that arrives late is still accepted when its hash matches
+  a validated header inside the download window.
+- These rules only change local behaviour. The wire protocol and the consensus rules are unchanged, so no
+  fork is needed and updated nodes stay compatible with nodes that are not yet updated.
+
 ## Limits
 
 Maximum payload 32 MiB, 32 peers (8 outbound), 50,000 `inv` items and 1,000 `addr` items per message, with

@@ -49,7 +49,18 @@ pub const BLOCK_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// The actual value is provided by the caller so that it can adapt to the
 /// observed peer behaviour, mirroring the adaptive stalling timeout used by
 /// reference node implementations.
-pub const BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(2);
+/// FIX (sync stall): 2 seconds was far too short on a real network. A peer
+/// that is busy (mining, saving the chain, serving another large message)
+/// was declared "stalling" every time, so the node never finished syncing.
+/// The base value is now 20 seconds and it is only counted while the peer is
+/// completely silent (see `PeerSyncState::last_activity_at`).
+pub const BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// FIX (sync stall): how long hashes that a peer failed to deliver are kept
+/// out of new requests to that same peer. Before this fix the hashes were
+/// blacklisted for the whole lifetime of the connection, so a node that had
+/// only one peer could never download those blocks again.
+pub const GIVE_UP_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// Number of headers requested in a single getheaders message.
 pub const MAX_HEADERS_RESULTS: u64 = 2000;
@@ -81,11 +92,17 @@ pub struct PeerSyncState {
     /// Block hashes that were requested from this peer but never delivered.
     /// The peer is not asked for these hashes again until it announces
     /// them through a fresh `inv` message.
-    pub requested_but_not_received: HashSet<String>,
+    /// FIX (sync stall): this is now a map of hash -> time it was given up,
+    /// so the hash can be requested again after `GIVE_UP_RETRY_COOLDOWN`.
+    pub requested_but_not_received: HashMap<String, Instant>,
     /// The height of the last block received from this peer.
     pub last_received_height: u64,
     /// When the last block was received from this peer.
     pub last_received_at: Instant,
+    /// FIX (sync stall): when ANY bytes were last read from this peer. A big
+    /// `headers` or `block` message takes a while to arrive; during that time
+    /// the peer is busy delivering data and must not be called stalling.
+    pub last_activity_at: Instant,
     /// Whether this peer is currently considered to be stalling.
     pub stalling: bool,
     /// When the current stalling period started, if any.
@@ -96,9 +113,10 @@ impl PeerSyncState {
     pub fn new() -> Self {
         PeerSyncState {
             in_flight: HashSet::new(),
-            requested_but_not_received: HashSet::new(),
+            requested_but_not_received: HashMap::new(),
             last_received_height: 0,
             last_received_at: Instant::now(),
+            last_activity_at: Instant::now(),
             stalling: false,
             stalling_since: None,
         }
@@ -111,7 +129,23 @@ impl PeerSyncState {
 
     /// Mark a block as requested from this peer.
     pub fn request(&mut self, hash: &str) {
+        // FIX (sync stall): the stall timer must start when the request is
+        // made, not at the time of the last received block (which could be
+        // minutes ago, e.g. right after a long header download).
+        if self.in_flight.is_empty() {
+            self.last_received_at = Instant::now();
+            self.last_activity_at = Instant::now();
+            self.stalling = false;
+            self.stalling_since = None;
+        }
+        // A fresh request replaces any earlier give-up mark for this hash.
+        self.requested_but_not_received.remove(hash);
         self.in_flight.insert(hash.to_string());
+    }
+
+    /// FIX (sync stall): record that bytes were just read from this peer.
+    pub fn note_activity(&mut self) {
+        self.last_activity_at = Instant::now();
     }
 
     /// Mark a block as received from this peer.
@@ -130,7 +164,7 @@ impl PeerSyncState {
     /// blocks it announces later through `inv`.
     pub fn give_up_on_in_flight(&mut self) {
         for hash in self.in_flight.drain() {
-            self.requested_but_not_received.insert(hash);
+            self.requested_but_not_received.insert(hash, Instant::now());
         }
         self.stalling = false;
         self.stalling_since = None;
@@ -149,11 +183,21 @@ impl PeerSyncState {
             return false;
         }
 
+        // FIX (sync stall): a peer is only silent when no bytes at all were
+        // read from it for `timeout`; it is only slow when it delivered no
+        // block for the (much longer) BLOCK_DOWNLOAD_TIMEOUT. The slow check
+        // keeps a peer from holding our requests forever by sending pings.
+        let silent = now.duration_since(self.last_activity_at) > timeout;
+        let slow = now.duration_since(self.last_received_at) > BLOCK_DOWNLOAD_TIMEOUT;
+        if !(silent || slow) {
+            self.stalling = false;
+            self.stalling_since = None;
+            return false;
+        }
+
         if !self.stalling {
-            if now.duration_since(self.last_received_at) > timeout {
-                self.stalling = true;
-                self.stalling_since = Some(now);
-            }
+            self.stalling = true;
+            self.stalling_since = Some(now);
             return false;
         }
 
@@ -291,6 +335,14 @@ impl SyncState {
         }
     }
 
+    /// FIX (sync stall): record that bytes were just read from a peer, so a
+    /// peer that is delivering a large message is not seen as stalling.
+    pub fn note_peer_activity(&mut self, peer_id: u64) {
+        if let Some(state) = self.peer_states.get_mut(&peer_id) {
+            state.note_activity();
+        }
+    }
+
     /// Return the total number of blocks currently in flight across all peers.
     pub fn total_in_flight(&self) -> usize {
         self.blocks_requested.len()
@@ -324,8 +376,12 @@ impl SyncState {
             None => return false,
         };
 
-        if peer_state.requested_but_not_received.contains(hash) {
-            return false;
+        // FIX (sync stall): only skip a hash during the cooldown. After it,
+        // the same peer is asked again (it may simply have been busy).
+        if let Some(given_up_at) = peer_state.requested_but_not_received.get(hash) {
+            if given_up_at.elapsed() < GIVE_UP_RETRY_COOLDOWN {
+                return false;
+            }
         }
 
         if !peer_state.can_request() {
@@ -1217,4 +1273,70 @@ pub fn accept_block(chain: &mut Blockchain, block: Block) -> Result<(), String> 
     chain.chain.push(block);
     chain.adjust_difficulty();
     Ok(())
+}
+
+// FIX (sync stall): regression tests for the stall handling.
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    // An `Instant` that lies `secs` seconds in the past.
+    fn ago(secs: u64) -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(secs))
+            .unwrap_or_else(Instant::now)
+    }
+
+    #[test]
+    fn request_restarts_the_stall_timer() {
+        // The peer was last heard from long ago (for example before a long
+        // header download). A new request must not be counted as stalling.
+        let mut st = PeerSyncState::new();
+        st.last_received_at = ago(600);
+        st.last_activity_at = ago(600);
+        st.request("aa");
+        assert!(!st.check_stalling(Instant::now(), BLOCK_STALLING_TIMEOUT));
+        assert!(!st.stalling);
+    }
+
+    #[test]
+    fn silent_peer_is_reported_after_the_timeout() {
+        let mut st = PeerSyncState::new();
+        st.request("aa");
+        st.last_activity_at = ago(60); // silent for longer than the timeout
+        let now = Instant::now();
+        // First call only marks the peer as stalling.
+        assert!(!st.check_stalling(now, BLOCK_STALLING_TIMEOUT));
+        assert!(st.stalling);
+        // A later call, after another full timeout, reports it.
+        let later = now + BLOCK_STALLING_TIMEOUT + Duration::from_secs(1);
+        assert!(st.check_stalling(later, BLOCK_STALLING_TIMEOUT));
+    }
+
+    #[test]
+    fn peer_that_keeps_sending_bytes_is_not_stalling() {
+        let mut st = PeerSyncState::new();
+        st.request("aa");
+        st.last_received_at = ago(30); // no block yet, but still < BLOCK_DOWNLOAD_TIMEOUT
+        st.note_activity(); // bytes are arriving right now
+        assert!(!st.check_stalling(Instant::now(), BLOCK_STALLING_TIMEOUT));
+        assert!(!st.stalling);
+    }
+
+    #[test]
+    fn given_up_hash_can_be_requested_again_after_the_cooldown() {
+        let mut sync = SyncState::new();
+        sync.register_peer(1);
+        assert!(sync.request_block(1, "h1"));
+        sync.give_up_on_stalling_peer(1);
+        // During the cooldown the hash is not requested again.
+        assert!(!sync.request_block(1, "h1"));
+        // After the cooldown the same (only) peer is asked again.
+        sync.peer_states
+            .get_mut(&1)
+            .unwrap()
+            .requested_but_not_received
+            .insert("h1".to_string(), ago(60));
+        assert!(sync.request_block(1, "h1"));
+    }
 }
