@@ -1283,10 +1283,14 @@ fn target_to_nbits(target: &[u8; 32]) -> u32 {
         mantissa |= target[i + 2] as u32;
     }
 
-    if mantissa & 0x00800000 == 0 {
-        mantissa <<= 8;
-        return (((size - 1) as u32) << 24) | (mantissa & 0x00ffffff);
+    // The compact format reserves bit 23 of the mantissa as a sign bit. When
+    // the leading mantissa bit is set, shift the mantissa right by one byte
+    // and grow the size so that the value is never read as negative.
+    let mut size = size as u32;
+    if mantissa & 0x00800000 != 0 {
+        mantissa >>= 8;
+        size += 1;
     }
 
-    ((size as u32) << 24) | (mantissa & 0x00ffffff)
+    (size << 24) | (mantissa & 0x007fffff)
 }

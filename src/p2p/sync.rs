@@ -641,6 +641,21 @@ impl SyncState {
         match chain.chain.iter().find(|b| b.hash == ancestor_hash) {
             Some(our_block) => {
                 ancestor_index = our_block.index;
+                // The state is rolled back to the ancestor, so the ancestor
+                // must carry a well-formed state root (disk corruption or a
+                // damaged chain would otherwise be accepted silently). The
+                // genesis block never commits to a state root by design.
+                if crate::consensus::rules::state_root_active(our_block.index) {
+                    let root = &our_block.state_root;
+                    let well_formed = root.len() == 64
+                        && root.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'));
+                    if !well_formed {
+                        return Err(format!(
+                            "reorg rejected: ancestor block {} has a missing or invalid state root",
+                            our_block.index
+                        ));
+                    }
+                }
             }
             None => {
                 return Err(format!(
