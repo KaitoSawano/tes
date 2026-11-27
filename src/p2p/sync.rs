@@ -684,6 +684,23 @@ impl SyncState {
             ));
         }
 
+        // SECURITY FIX: the new block used to be trusted blindly here. Its
+        // proof of work, hash, merkle root, reward and chainwork were never
+        // checked, so a forged block with a huge claimed `chainwork` could
+        // roll the chain back and replace it. Run the full structural
+        // validation against the real ancestor before anything is changed.
+        let ancestor_block = match chain.chain.iter().find(|b| b.hash == ancestor_hash) {
+            Some(b) => b.clone(), // copy of the real parent block on our chain
+            None => return Err("reorg rejected: ancestor block not found".into()), // cannot happen, checked above
+        };
+        if let Err(e) = validate_block_structural(chain, &ancestor_block, &new_block) {
+            // Reject the forged / invalid block with its error code.
+            return Err(format!(
+                "reorg block {} rejected: [{}] {}",
+                new_block.index, e.code, e.message
+            ));
+        }
+
         let original_len = chain.chain.len();
         let rollback_blocks: Vec<Block> = if ancestor_index + 1 < original_len as u64 {
             chain.chain[(ancestor_index + 1) as usize..].to_vec()
@@ -777,6 +794,7 @@ fn validate_block_structural(
     validation::rule_block_index_sequential(parent, block)?;
     validation::rule_block_hash_consistent(block)?;
     validation::rule_block_previous_hash(parent, block)?;
+    validation::rule_block_state_root_format(block)?; // state root must be well formed (was skipped for side branches)
     validation::rule_block_merkle_root(block)?;
     validation::rule_block_subsidy(block)?;
     validation::rule_block_total_fees(block)?;

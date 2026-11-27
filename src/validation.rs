@@ -131,6 +131,22 @@ pub fn rule_message_format(tx: &Transaction) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// SECURITY FIX: `output_script` is part of the txid but NOT of the signing
+/// hash, and the wallet never sets it. A relay node could therefore attach
+/// arbitrary (large) data to someone else's transaction, changing its txid
+/// without invalidating the signature (malleability, mempool poisoning and
+/// block bloat). Normal transactions must leave it empty.
+pub fn rule_output_script_empty(tx: &Transaction) -> Result<(), ValidationError> {
+    if !tx.output_script.is_empty() {
+        // Reject any transaction that carries unsigned script data.
+        return Err(ValidationError::new(
+            "E013",
+            "output_script must be empty for normal transactions",
+        ));
+    }
+    Ok(())
+}
+
 /// Strict rule: Ensure the amount is within the valid money range.
 /// This prevents integer overflow attacks where a user tries to send
 /// an amount larger than the total supply.
@@ -667,7 +683,9 @@ pub fn rule_header_nbits_path(prev: &Block, h: &Block) -> Result<(), ValidationE
         let ht = pow::nbits_to_target(h.nbits);
         let max = crate::blockchain::scale_target(&pt, 1040);
         let min = crate::blockchain::scale_target(&pt, 48);
-        ht <= max && ht >= min
+        // SECURITY FIX: also enforce the proof-of-work limit, otherwise a peer
+        // could ratchet up cheap headers with an easier target than allowed.
+        ht <= max && ht >= min && ht.as_slice() <= crate::blockchain::pow_limit_bytes().as_slice()
     };
     if !ok {
         return Err(ValidationError::new(
@@ -746,6 +764,7 @@ pub fn validate_transaction(chain: &Blockchain, tx: &Transaction) -> Result<(), 
     }
 
     rule_txid_consistent(tx)?;
+    rule_output_script_empty(tx)?; // unsigned script data is not allowed
     rule_address_format(&tx.from, chain)?;
     rule_address_format(&tx.to, chain)?;
     rule_self_send(tx)?;
@@ -779,6 +798,7 @@ pub fn validate_tx_for_block(
         return Err(ValidationError::new("E026", "special transaction in a block"));
     }
     rule_txid_consistent(tx)?;
+    rule_output_script_empty(tx)?; // unsigned script data is not allowed
     rule_address_format(&tx.from, chain)?;
     rule_address_format(&tx.to, chain)?;
     rule_self_send(tx)?;
@@ -838,6 +858,7 @@ pub fn validate_block_transactions(
 
         // Structural checks that do not depend on the chain state.
         rule_txid_consistent(tx)?;
+        rule_output_script_empty(tx)?; // unsigned script data is not allowed
         rule_address_format(&tx.from, chain)?;
         rule_address_format(&tx.to, chain)?;
         rule_self_send(tx)?;
@@ -907,7 +928,7 @@ pub fn validate_block_transactions(
             let to_balance = overlay_balances
                 .get(&tx.to)
                 .copied()
-                .unwrap_or_else(|| chain.balance_of(&tx.to));
+                .unwrap_or_else(|| chain.mature_balance_at(&tx.to, height)); // SECURITY FIX: balance_of() counted immature coinbase, letting a block spend it
             let new_to = match to_balance.checked_add(tx.amount) {
                 Some(v) => v,
                 None => return Err(ValidationError::new("E024", "recipient balance overflows u64")),

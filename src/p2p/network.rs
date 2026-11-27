@@ -1660,7 +1660,10 @@ fn build_locator(chain: &Blockchain) -> BlockLocator {
 
 fn build_headers_response(chain: &Blockchain, loc: &BlockLocator) -> Vec<Block> {
     let mut start = 0u64;
-    for h in &loc.locator_hashes {
+    // SECURITY FIX: look at no more than 101 locator hashes (same limit as
+    // Bitcoin). Each lookup scans the whole chain, so 5000 locators from one
+    // peer used to burn a lot of CPU while the chain lock was held.
+    for h in loc.locator_hashes.iter().take(101) {
         if let Some(b) = chain.chain.iter().find(|b| &b.hash == h) {
             start = b.index + 1;
             break;

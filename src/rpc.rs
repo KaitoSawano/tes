@@ -751,8 +751,19 @@ impl RpcHandler {
 
         chain.chain.push(block.clone());
         chain.adjust_difficulty();
-        chain.mempool.clear();
-        chain.mempool_timestamps.clear();
+        // SECURITY/USABILITY FIX: only drop transactions that are now stale
+        // (mined or nonce already used). The old code cleared the whole
+        // mempool, deleting every other user's pending transaction.
+        let stale: Vec<String> = chain
+            .mempool
+            .iter()
+            .filter(|t| t.nonce < chain.nonce_of(&t.from)) // nonce already consumed by the new block
+            .map(|t| t.txid.clone())
+            .collect();
+        chain.mempool.retain(|t| !stale.contains(&t.txid)); // remove stale entries only
+        for id in &stale {
+            chain.mempool_timestamps.remove(id); // keep the timestamp map in sync
+        }
 
         block.log_add_to_wallet();
 

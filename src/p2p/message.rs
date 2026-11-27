@@ -21,6 +21,11 @@ pub const MAX_INV_ITEMS: usize = 50_000;
 pub const MAX_ADDR_ITEMS: usize = 1_000;
 pub const MAX_HEADERS_ITEMS: usize = 5_000;
 
+/// SECURITY FIX: maximum byte length of any string read from the wire
+/// (user agent, reject command, reject reason). Before, a peer could force a
+/// copy of up to 32 MB per string.
+pub const MAX_WIRE_STRING_LEN: usize = 1_024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InvType {
     Transaction = 1,
@@ -196,6 +201,9 @@ fn write_string(out: &mut Vec<u8>, s: &str) {
 
 fn read_string(input: &mut &[u8]) -> Result<String, String> {
     let len = read_varint(input)? as usize;
+    if len > MAX_WIRE_STRING_LEN {
+        return Err(format!("string: too long ({} bytes)", len)); // SECURITY FIX: cap the length
+    }
     if input.len() < len {
         return Err("string: not enough bytes".into());
     }
@@ -399,6 +407,12 @@ impl Message {
                     serde_json::from_slice(payload).map_err(|e| format!("headers: {}", e))?;
                 if headers.len() > MAX_HEADERS_ITEMS {
                     return Err(format!("headers: too many headers ({})", headers.len()));
+                }
+                // SECURITY FIX: honest nodes always send headers WITHOUT
+                // transactions. A header that carries a body is only a way to
+                // push megabytes through the cheap header path.
+                if headers.iter().any(|h| !h.transactions.is_empty()) {
+                    return Err("headers: header contains transactions".into());
                 }
                 Ok(Message::Headers(headers))
             }

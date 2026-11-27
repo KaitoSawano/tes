@@ -187,25 +187,86 @@ impl Block {
         hex::encode(layer[0])
     }
 
+    /// Work of one block: floor(2^256 / (target + 1)), saturated to u128.
+    ///
+    /// SECURITY FIX: the old code returned 1 for every target above 2^128, so
+    /// on mainnet each block counted as the same work and the "heaviest"
+    /// chain was simply the longest one. A cheap long chain could beat the
+    /// real chain. The work is now computed on the full 256-bit target.
     pub fn compute_work(nbits: u32) -> u128 {
-        let target = pow::nbits_to_target(nbits);
+        let target = pow::nbits_to_target(nbits); // 256-bit big-endian target
 
-        for &b in &target[0..16] {
-            if b != 0 {
-                return 1;
-            }
-        }
-
-        let mut target_u128: u128 = 0;
-        for &b in &target[16..32] {
-            target_u128 = (target_u128 << 8) | (b as u128);
-        }
-
-        if target_u128 == 0 {
+        // A zero target is not a valid difficulty: report maximum work.
+        if target.iter().all(|&b| b == 0) {
             return u128::MAX;
         }
 
-        u128::MAX / (target_u128.saturating_add(1))
+        // Load the target into four 64-bit limbs (limb 0 is the most significant).
+        let mut t = [0u64; 4];
+        for i in 0..4 {
+            let mut limb = [0u8; 8]; // eight bytes of the target
+            limb.copy_from_slice(&target[i * 8..i * 8 + 8]);
+            t[i] = u64::from_be_bytes(limb);
+        }
+
+        // Target = 2^256 - 1 means work 1 (and target + 1 would overflow).
+        if t == [u64::MAX; 4] {
+            return 1;
+        }
+
+        // divisor = target + 1 (cannot overflow, checked above).
+        let mut d = t;
+        for i in (0..4).rev() {
+            let (v, carry) = d[i].overflowing_add(1); // add one with carry
+            d[i] = v;
+            if !carry {
+                break; // no further carry: done
+            }
+        }
+
+        // numerator = 2^256 - 1 - target = bitwise NOT of the target.
+        let n = [!t[0], !t[1], !t[2], !t[3]];
+
+        // Bitwise long division of n by d: q = n / d. work = q + 1, because
+        // 2^256 / (target + 1) == (2^256 - 1 - target) / (target + 1) + 1.
+        let mut q = [0u64; 4]; // quotient
+        let mut rem = [0u64; 4]; // remainder (a 257th bit is tracked by `top`)
+        for bit in 0..256usize {
+            let top = rem[0] >> 63; // bit that falls out when shifting left
+            for i in 0..3 {
+                rem[i] = (rem[i] << 1) | (rem[i + 1] >> 63); // shift remainder left by one
+            }
+            rem[3] = (rem[3] << 1) | ((n[bit / 64] >> (63 - (bit % 64))) & 1); // bring in next numerator bit
+            // Compare rem >= d (a set `top` bit means rem is certainly larger).
+            let ge = top == 1 || {
+                let mut ord = std::cmp::Ordering::Equal; // limb-wise comparison
+                for i in 0..4 {
+                    if rem[i] != d[i] {
+                        ord = rem[i].cmp(&d[i]);
+                        break;
+                    }
+                }
+                ord != std::cmp::Ordering::Less
+            };
+            if ge {
+                // rem -= d (wrapping subtraction is correct even with the 257th bit)
+                let mut borrow = false;
+                for i in (0..4).rev() {
+                    let (v1, b1) = rem[i].overflowing_sub(d[i]);
+                    let (v2, b2) = v1.overflowing_sub(borrow as u64);
+                    rem[i] = v2;
+                    borrow = b1 || b2;
+                }
+                q[bit / 64] |= 1u64 << (63 - (bit % 64)); // set this quotient bit
+            }
+        }
+
+        // Saturate: if the quotient does not fit in 128 bits, return u128::MAX.
+        if q[0] != 0 || q[1] != 0 {
+            return u128::MAX;
+        }
+        let low = ((q[2] as u128) << 64) | (q[3] as u128); // low 128 bits of the quotient
+        low.saturating_add(1) // work = quotient + 1
     }
 
     /// Build a block with zero subsidy, zero fees, and no reward. This

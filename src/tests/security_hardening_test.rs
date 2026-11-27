@@ -26,40 +26,27 @@ fn with_temp_datadir<F: FnOnce()>(f: F) {
     std::env::remove_var("XEPC_DATADIR");
 }
 
-/// `compute_work` must be bounded for any valid nbits.
+/// `compute_work` must reflect the real difficulty (work = 2^256 / (target + 1)).
 ///
-/// A target that exceeds `u128::MAX` yields the minimum work (1), because
-/// the difficulty is trivially low. This mirrors the behaviour of
-/// reference node implementations, which clamp chainwork to 1 when the
-/// target is larger than the chainwork word size.
+/// The old formula returned 1 for every target above 2^128, which made the
+/// fork choice "longest chain". The work must now grow when the target shrinks.
 #[test]
-fn compute_work_is_bounded_for_valid_nbits() {
-    // Mainnet nbits (0x1e0ffff0) has a target that exceeds u128::MAX,
-    // so compute_work must return the minimum possible work (1).
-    let nbits = Network::Main.genesis_nbits();
-    let work = Block::compute_work(nbits);
-    assert_eq!(
-        work, 1,
-        "compute_work must return 1 for a target that exceeds u128::MAX"
-    );
+fn compute_work_follows_difficulty() {
+    // Mainnet genesis nbits 0x1e0ffff0: target = 0x0ffff0 * 2^(8*27).
+    let main_work = Block::compute_work(Network::Main.genesis_nbits());
+    assert!(main_work > 1, "mainnet work must be larger than 1"); // no longer clamped to 1
 
-    // Regtest nbits (0x207fffff) also has a target that exceeds u128::MAX.
-    let regtest_nbits = Network::Regtest.genesis_nbits();
-    let regtest_work = Block::compute_work(regtest_nbits);
-    assert_eq!(
-        regtest_work, 1,
-        "compute_work must return 1 for Regtest nbits"
-    );
+    // Regtest 0x207fffff: target ~ 2^255, so the work is exactly 2.
+    let regtest_work = Block::compute_work(Network::Regtest.genesis_nbits());
+    assert_eq!(regtest_work, 2, "regtest work must be 2");
 
-    // 0x1000ffff: exponent 16, target = 0x00ffff * 2^104.
-    // The first 16 bytes of the target are all zero, so the target fits
-    // in u128. compute_work must return a value greater than 1.
-    let small_nbits = 0x1000ffffu32;
-    let small_work = Block::compute_work(small_nbits);
-    assert!(
-        small_work > 1,
-        "compute_work must return work > 1 for a target that fits in u128"
-    );
+    // A harder (smaller) target must always give more work.
+    let harder = Block::compute_work(0x1d00ffffu32);
+    assert!(harder > main_work, "smaller target must mean more work");
+
+    // 0x1000ffff has a tiny target: the work is huge (saturates at u128::MAX).
+    let small_work = Block::compute_work(0x1000ffffu32);
+    assert!(small_work > harder, "tiny target must mean huge work");
 }
 
 /// `compute_work` must return `u128::MAX` only for a zero target.

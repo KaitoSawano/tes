@@ -66,7 +66,9 @@ pub fn address_from_public_key_bech32(public_key: &[u8]) -> Result<String, Strin
 pub fn verify_bech32_address(address: &str) -> bool {
     let hrp = blockchain::bech32_hrp();
     match bech32::decode(address) {
-        Some((decoded_hrp, _data)) => decoded_hrp == hrp,
+        // SECURITY FIX: also require the 20-byte hash length, otherwise
+        // addresses with arbitrary payload sizes created junk accounts.
+        Some((decoded_hrp, data)) => decoded_hrp == hrp && data.len() == 20,
         None => false,
     }
 }

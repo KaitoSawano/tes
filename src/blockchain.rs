@@ -805,27 +805,48 @@ impl Blockchain {
         }
     }
 
+    /// Put back a mempool entry that was taken out for a replace-by-fee
+    /// attempt which then failed. (SECURITY FIX: see `add_transaction`.)
+    fn restore_replaced(&mut self, replaced: Option<(usize, Transaction, Option<u64>)>) {
+        if let Some((pos, old_tx, old_ts)) = replaced {
+            let old_txid = old_tx.txid.clone(); // keep the id for the timestamp map
+            let at = pos.min(self.mempool.len()); // never insert past the end
+            self.mempool.insert(at, old_tx); // restore the original position
+            if let Some(ts) = old_ts {
+                self.mempool_timestamps.insert(old_txid, ts); // restore its arrival time
+            }
+        }
+    }
+
     pub fn add_transaction(&mut self, tx: Transaction) -> bool {
         self.evict_expired_transactions();
 
-        // Reject a transaction that was already mined, even when the
-        // mempool no longer contains it. Without this check, a peer that
-        // rebroadcasts an old transaction would put it back into the
-        // mempool, and the next mining attempt would fail because the
-        // state nonce has already moved past the transaction nonce.
-        if self.is_txid_in_chain(&tx.txid) {
-            println!(
-                "[mempool] Rejected tx {}: already included in a block",
-                tx.txid
-            );
+        // SECURITY FIX: coinbase / genesis transactions must never enter the
+        // mempool (validate_transaction treats them as valid special cases).
+        if validation::is_special_tx(&tx) {
             return false;
         }
+
+        // SECURITY FIX (cheap early reject): a nonce below the account nonce
+        // was already used, so the transaction is stale or a replay. This
+        // avoids the expensive full-chain scan below for such spam.
+        if tx.nonce < self.nonce_of(&tx.from) {
+            return false;
+        }
+
+        // A transaction that was already mined has a used nonce, so the check
+        // above rejects it. The former full-chain scan (`is_txid_in_chain`,
+        // O(chain length) per transaction) was a CPU DoS and is not needed.
 
         if self.mempool.iter().any(|t| t.txid == tx.txid) {
             return false;
         }
 
         let rbf_pos = self.mempool.iter().position(|t| t.from == tx.from && t.nonce == tx.nonce);
+
+        // Holds the entry removed for replacement so it can be restored if the
+        // new transaction turns out to be invalid.
+        let mut replaced: Option<(usize, Transaction, Option<u64>)> = None;
 
         if let Some(pos) = rbf_pos {
             let old_tx = &self.mempool[pos];
@@ -842,8 +863,15 @@ impl Blockchain {
                     "[mempool] RBF: Replacing tx {} (fee rate {}) with {} (fee rate {})",
                     old_tx.txid, old_fee_rate, tx.txid, new_fee_rate
                 );
-                self.mempool_timestamps.remove(&old_tx.txid);
-                self.mempool.remove(pos);
+                // SECURITY FIX: the old transaction used to be deleted here,
+                // BEFORE the replacement was validated. Anyone could evict a
+                // victim's pending transaction by sending an unsigned
+                // look-alike with a higher fee. Now it is only taken out
+                // temporarily and restored when validation fails.
+                let old_txid = old_tx.txid.clone(); // id of the entry being replaced
+                let old_ts = self.mempool_timestamps.remove(&old_txid); // remember arrival time
+                let removed = self.mempool.remove(pos); // take the old entry out for now
+                replaced = Some((pos, removed, old_ts)); // keep it for a possible restore
             } else {
                 println!(
                     "[mempool] Rejected RBF attempt: new fee rate {} < required {}",
@@ -860,6 +888,7 @@ impl Blockchain {
                     "[mempool] Rejected tx {}: [{}] {}",
                     tx.txid, e.code, e.message
                 );
+                self.restore_replaced(replaced); // the replacement is invalid: keep the original
                 return false;
             }
         }
@@ -873,6 +902,7 @@ impl Blockchain {
                 "[mempool] Rejected tx {}: fee rate {} < dynamic minRelayTxFee {} (mempool size: {} bytes)",
                 tx.txid, fee_rate, current_min_fee, self.mempool_size_bytes()
             );
+            self.restore_replaced(replaced); // keep the original entry
             return false;
         }
 
@@ -884,6 +914,7 @@ impl Blockchain {
                     "[mempool] Rejected tx {}: mempool full and fee rate {} is too low",
                     tx.txid, fee_rate
                 );
+                self.restore_replaced(replaced); // keep the original entry
                 return false;
             }
         }
@@ -1236,7 +1267,7 @@ pub(crate) fn scale_target(target: &[u8; 32], scale_256: u128) -> [u8; 32] {
 }
 
 /// The proof-of-work limit (easiest allowed target) as 32 bytes.
-fn pow_limit_bytes() -> [u8; 32] {
+pub(crate) fn pow_limit_bytes() -> [u8; 32] { // pub(crate): also used by header validation
     let mut out = [0xffu8; 32]; // fallback: no limit
     if let Ok(b) = hex::decode(cpow::pow_limit()) {
         if b.len() == 32 {
