@@ -495,8 +495,11 @@ impl Blockchain {
         }
     }
 
+    /// Total coins created so far. Only the subsidy is new money; the fees inside
+    /// `reward` are moved from the senders to the miner and were already counted.
     pub fn circulating_supply(&self) -> u64 {
-        self.chain.iter().fold(0u64, |acc, b| acc.saturating_add(b.reward))
+        // Sum the subsidy (not `reward`, which also contains the fees) of every block.
+        self.chain.iter().fold(0u64, |acc, b| acc.saturating_add(b.subsidy))
     }
 
     pub fn calculate_reward(height: u64) -> u64 {
@@ -1221,12 +1224,10 @@ impl Blockchain {
         let (valid_txs, total_fees, root) =
             self.build_block_candidate(txs, &miner, next_index, subsidy)?;
 
-        let reward = subsidy
-            .checked_add(total_fees)
-            .ok_or_else(|| "block reward overflow".to_string())?;
+        // Only the subsidy creates new coins; the fees are already in circulation.
         let new_supply = self
             .circulating_supply()
-            .checked_add(reward)
+            .checked_add(subsidy)
             .ok_or_else(|| "circulating supply overflow".to_string())?;
         if new_supply > spec::MAX_SUPPLY {
             return Err("max supply reached".into());

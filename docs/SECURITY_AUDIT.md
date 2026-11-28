@@ -26,3 +26,27 @@ Audit manual (tanpa kompilasi). Jalankan `cargo test` sebelum rilis.
 ## Koreksi temuan
 
 Aturan Median-Time-Past TIDAK perlu ditambahkan: aturan `timestamp >= prev` sudah lebih ketat, dan retarget memakai MTP.
+
+## Audit double spending, koin dari udara kosong, saldo tidak berkurang
+
+Audit manual (tanpa kompilasi), hanya jalur uang: `validation.rs`, `storage/state.rs`, `blockchain.rs` (`stage_block`, `connect_block`, mempool), `p2p/sync.rs` (reorg), `pow.rs`, `block.rs`, `dilithium/*`.
+
+### Yang diperiksa dan terbukti aman
+
+| Risiko | Mengapa aman |
+|--------|--------------|
+| Double spend (tx yang sama dua kali / replay) | Nonce harus sama persis dengan nonce akun (`apply_tx_to_account`), txid ganda dalam satu block ditolak (E025), tanda tangan memuat chain id |
+| Saldo tidak berkurang setelah transaksi | `apply_tx_to_account` selalu mengurangi `amount + fee` dengan `checked_sub`; self-send hanya mengembalikan `amount`, fee tetap berkurang |
+| Koin dari udara kosong | `connect_block` memeriksa `pending_supply_delta == subsidy` sebelum commit; reward, subsidy, total_fees, merkle, dan txid dicek ulang di validasi |
+| Overflow / underflow | Semua penjumlahan saldo, fee, nonce, dan reward memakai `checked_*` |
+| Spend coinbase belum matang | Validasi dan apply memakai aturan maturity yang sama (`block.index`) |
+| Tx tanpa tanda tangan lolos | `COINBASE` / `GENESIS` tidak lagi dianggap spesial di luar genesis; alamat `from` harus sama persis dengan hash public key |
+
+### Sudah diperbaiki di kode
+
+| # | Berkas | Masalah | Dampak | Perbaikan |
+|---|--------|---------|--------|-----------|
+| 10 | `src/blockchain.rs` `circulating_supply`, `mine_pending`; `src/validation.rs` `validate_block` | Suplai dihitung dari `reward` (subsidy + fee), padahal fee hanya berpindah dari pengirim ke miner | Suplai yang dilaporkan RPC membengkak; di dekat batas 780 juta block valid bisa ditolak (E041) | Hitung dari `subsidy` saja |
+| 11 | `src/validation.rs` `validate_block_transactions` | Tx spesial (`COINBASE`/`GENESIS`) dilewati (`continue`) padahal `stage_block` menolaknya | Block lolos validasi lalu gagal saat apply; di jalur reorg memicu rebuild state penuh | Tolak langsung dengan E026, sama seperti `validate_tx_for_block` |
+
+Catatan: kedua perbaikan tidak mengubah hasil validasi untuk rantai yang ada sekarang (suplai jauh di bawah batas, dan block normal tidak memuat tx spesial), jadi tidak memecah konsensus.

@@ -858,7 +858,10 @@ pub fn validate_block_transactions(
 
     for tx in transactions {
         if is_special_tx(tx) {
-            continue;
+            // SECURITY FIX: this used to `continue`, so a block carrying a COINBASE/GENESIS
+            // transaction passed validation here and only failed later in `stage_block`.
+            // Reject it up front with the same code as `validate_tx_for_block`.
+            return Err(ValidationError::new("E026", "special transaction in a block"));
         }
 
         // Strict rule: reject a block that contains the same txid twice.
@@ -1006,7 +1009,8 @@ pub fn validate_block(
     validate_block_transactions(chain, &block.transactions, block.index)?;
 
     // Verify total supply does not exceed MAX_MONEY after this block
-    let new_supply = chain.circulating_supply().checked_add(block.reward)
+    // Only the subsidy is newly created money; the fees inside `reward` already exist.
+    let new_supply = chain.circulating_supply().checked_add(block.subsidy)
         .ok_or_else(|| ValidationError::new("E041", "supply overflow"))?;
     if new_supply > spec::MAX_SUPPLY {
         return Err(ValidationError::new(
