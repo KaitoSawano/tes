@@ -37,3 +37,27 @@ fn bech32_bip173_vector() {
     assert_eq!(hrp, "bc");
     assert_eq!(hex::encode(data), "751e76e8199196d454941c45d1b3a323f1433bd6");
 }
+
+#[test]
+fn bech32_bip173_32_byte_program() {
+    let (hrp, data) =
+        decode("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7").unwrap();
+    assert_eq!(hrp, "tb");
+    assert_eq!(
+        hex::encode(data),
+        "1863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"
+    );
+}
+
+#[test]
+fn bech32_bip173_invalid_vectors() {
+    // Bad checksum.
+    assert!(decode("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5").is_none());
+    // Witness version above 0 is not used by XEPAY.
+    assert!(decode("bc1zw508d6qejxtdg4y5r3zarvaryvqyzf3du").is_none());
+    // Invalid zero padding.
+    assert!(decode("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3pjxtptv").is_none());
+    // Empty data part and empty HRP.
+    assert!(decode("bc1gmk9yu").is_none());
+    assert!(decode("1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").is_none());
+}

@@ -2,7 +2,7 @@
 // Distributed under the Apache License, see the accompanying
 // file LICENSE or https://www.apache.org/licenses/LICENSE-2.0.
 
-use xepay::base58::{decode, encode};
+use xepay::base58::{decode, decode_raw, encode, encode_raw};
 
 #[test]
 fn base58_roundtrip() {
@@ -31,4 +31,24 @@ fn base58_rejects_corrupted_checksum() {
 fn base58_rejects_invalid_input() {
     assert!(decode("").is_none());
     assert!(decode("0OIl").is_none());
+}
+
+#[test]
+fn base58_raw_known_vectors() {
+    // Standard Base58 vectors (same alphabet as Bitcoin).
+    assert_eq!(encode_raw(b"Hello World!"), "2NEpo7TZRRrLZSi2U");
+    assert_eq!(encode_raw(&[0x00, 0x00, 0x28, 0x7f, 0xb4, 0xcd]), "11233QC4");
+    assert_eq!(encode_raw(b"abc"), "ZiCa");
+    assert_eq!(encode_raw(b""), "");
+    assert_eq!(encode_raw(&[0u8]), "1");
+    assert_eq!(
+        decode_raw("2NEpo7TZRRrLZSi2U"),
+        Some(b"Hello World!".to_vec())
+    );
+    assert_eq!(decode_raw("11233QC4"), Some(vec![0, 0, 0x28, 0x7f, 0xb4, 0xcd]));
+}
+
+#[test]
+fn base58_rejects_overlong_input() {
+    assert!(decode(&"1".repeat(200)).is_none());
 }
