@@ -594,6 +594,10 @@ impl SyncState {
             apply_block_with_undo(chain, &block)?;
             chain.chain.push(block.clone());
             chain.adjust_difficulty();
+            // SECURITY FIX: a block received from a peer never touched the
+            // mempool, so mined transactions and entries that became
+            // unaffordable stayed in it and kept being relayed.
+            chain.prune_mempool_after_block();
 
             // Persist the new active block and demote the previous tip
             // if it had been stored as a fork.
@@ -1052,6 +1056,7 @@ fn drain_orphans(chain: &mut Blockchain, sync_state: &mut SyncState) {
                 }
                 chain.chain.push(orphan.block.clone());
                 chain.adjust_difficulty();
+                chain.prune_mempool_after_block(); // drop entries the connected orphan made unusable
                 let _ = storage::save_block_only(&orphan.block);
                 let _ = storage::set_block_status(&orphan.block.hash, BlockStatus::Active);
                 sync_state.connected_block(&hash);
@@ -1272,6 +1277,7 @@ pub fn accept_block(chain: &mut Blockchain, block: Block) -> Result<(), String> 
 
     chain.chain.push(block);
     chain.adjust_difficulty();
+    chain.prune_mempool_after_block(); // drop entries the new block made unusable
     Ok(())
 }
 

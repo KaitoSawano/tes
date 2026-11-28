@@ -184,7 +184,7 @@ fn select_source_address(
         if wallet.get_entry(from).is_none() {
             return Err(format!("from address {} not found in wallet", from));
         }
-        let bal = chain.mature_balance_at(from, current_height);
+        let bal = chain.spendable_balance_at(from, current_height); // mature balance minus pending spend
         if bal >= need {
             return Ok(from.to_string());
         }
@@ -199,7 +199,7 @@ fn select_source_address(
         if entry.address == to {
             continue;
         }
-        let bal = chain.mature_balance_at(&entry.address, current_height);
+        let bal = chain.spendable_balance_at(&entry.address, current_height); // mature balance minus pending spend
         if bal < need {
             continue;
         }
@@ -216,7 +216,7 @@ fn select_source_address(
     let mut details: Vec<String> = Vec::new();
     let mut total_available: u64 = 0;
     for entry in &wallet.entries {
-        let bal = chain.mature_balance_at(&entry.address, current_height);
+        let bal = chain.spendable_balance_at(&entry.address, current_height); // mature balance minus pending spend
         total_available = total_available.saturating_add(bal);
         let marker = if entry.address == to { " (destination)" } else { "" };
         details.push(format!("{} = {} ald{}", entry.address, bal, marker));
@@ -752,16 +752,7 @@ impl RpcHandler {
         // SECURITY/USABILITY FIX: only drop transactions that are now stale
         // (mined or nonce already used). The old code cleared the whole
         // mempool, deleting every other user's pending transaction.
-        let stale: Vec<String> = chain
-            .mempool
-            .iter()
-            .filter(|t| t.nonce < chain.nonce_of(&t.from)) // nonce already consumed by the new block
-            .map(|t| t.txid.clone())
-            .collect();
-        chain.mempool.retain(|t| !stale.contains(&t.txid)); // remove stale entries only
-        for id in &stale {
-            chain.mempool_timestamps.remove(id); // keep the timestamp map in sync
-        }
+        chain.prune_mempool_after_block(); // drops mined entries and entries the sender can no longer afford
 
         block.log_add_to_wallet();
 
@@ -1435,9 +1426,9 @@ impl RpcHandler {
                 if let Err(e) = chain.connect_block(&block) {
                     return RpcResponse::err(&format!("block rejected: {}", e));
                 }
-                chain.mempool.retain(|t| !block.transactions.iter().any(|b| b.txid == t.txid));
                 chain.chain.push(block.clone());
                 chain.adjust_difficulty();
+                chain.prune_mempool_after_block(); // drops mined entries and entries the sender can no longer afford
                 block.log_add_to_wallet();
                 if let Err(e) = storage::save_chain(&mut chain) {
                     return RpcResponse::err(&format!("failed to save chain: {}", e));
@@ -1575,7 +1566,7 @@ impl RpcHandler {
         let amount_ald: u64 = if is_sendall {
             let chain = self.state.chain.blocking_read();
             let height = chain.height();
-            let bal = chain.mature_balance_at(&from_address, height);
+            let bal = chain.spendable_balance_at(&from_address, height); // mature balance minus pending spend
 
             // FIX: Use checked_sub to prevent underflow if bal <= fee
             match bal.checked_sub(fee) {
@@ -1629,10 +1620,8 @@ impl RpcHandler {
         let txid = tx.txid.clone();
 
         let mut chain = self.state.chain.blocking_write();
-        if !chain.add_transaction(tx.clone()) {
-            return RpcResponse::err(
-                "transaction rejected by mempool (RBF, eviction, or dynamic min relay fee)",
-            );
+        if let Err(reason) = chain.add_transaction_checked(tx.clone()) {
+            return RpcResponse::err(&format!("transaction rejected by mempool: {}", reason)); // say why it was refused
         }
 
         let now = now_millis();
@@ -1763,8 +1752,8 @@ impl RpcHandler {
         let txid = tx.txid.clone();
 
         let mut chain = self.state.chain.blocking_write();
-        if !chain.add_transaction(tx.clone()) {
-            return RpcResponse::err("transaction rejected by mempool (RBF, eviction, or dynamic min relay fee)");
+        if let Err(reason) = chain.add_transaction_checked(tx.clone()) {
+            return RpcResponse::err(&format!("transaction rejected by mempool: {}", reason)); // say why it was refused
         }
 
         let now = now_millis();

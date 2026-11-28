@@ -23,6 +23,8 @@ If you discover a security vulnerability in XEPAY, please do not open a public i
 | State corruption or crash | in-memory block batch, state root check, single synced write, crash recovery on start, `-reindex` |
 | Eclipse / Sybil | anchors, ban manager, ASN map, peer limits |
 | Spam | fee market, relay fee floor, mempool caps, per-peer message rate limits |
+| Mempool overdraft (queueing more transfers than the balance can pay) | the mempool counts the amount + fee of a sender's pending transactions together with each new one; the wallet picks a source address by its spendable balance |
+| Mempool flooding by one account | at most 25 unconfirmed transactions per sender (`MAX_PENDING_TXS_PER_SENDER`); entries a new block made unusable are removed (`prune_mempool_after_block`), also when the node starts |
 | Quantum computers | ML-DSA-65 signatures and SHA3-256 |
 
 ## Cryptography

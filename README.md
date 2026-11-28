@@ -11,7 +11,7 @@
 
 ## Overview
 
-**XEPAY** (**XEPC**) is an independent Layer-1 proof-of-work payment network written in Rust.
+**XEPAY CHAIN** (**XEPC**) is an independent Layer-1 proof-of-work payment network written in Rust.
 It uses an account-based ledger, a Merkle Patricia Trie state root, LevelDB storage and a
 headers-first peer-to-peer protocol. It focuses on one job: fast, verifiable value transfer.
 

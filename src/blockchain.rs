@@ -181,6 +181,11 @@ pub const TYPICAL_TX_SIZE_BYTES: u64 = 5_400;
 pub const MEMPOOL_MAX_TXS: usize = rules::MAX_TX_PER_BLOCK * 20;
 pub const MEMPOOL_EXPIRY_SECS: u64 = 336 * 3600;
 pub const RBF_MIN_FEE_BUMP_PERCENT: u64 = 10;
+/// SECURITY FIX (mempool flooding): the most unconfirmed transactions one
+/// sender may keep in the mempool at the same time. Without a cap a single
+/// account could chain an unlimited number of transactions and fill the
+/// mempool of every peer with them.
+pub const MAX_PENDING_TXS_PER_SENDER: usize = 25;
 
 /// Hard-coded checkpoints (height -> block hash), one list per network.
 ///
@@ -568,6 +573,24 @@ impl Blockchain {
         }
     }
 
+    /// Total amount + fee (in ald) that the mempool already commits for
+    /// `addr`. It is summed in u128 so that no mix of values can wrap.
+    pub fn pending_spend_of(&self, addr: &str) -> u128 {
+        self.mempool
+            .iter()
+            .filter(|t| t.from == addr) // only transactions sent by this account
+            .map(|t| t.amount as u128 + t.fee as u128) // what each one will take out of the balance
+            .sum()
+    }
+
+    /// Mature balance of `addr` at `height` minus what its pending
+    /// transactions already commit: the amount it can still spend.
+    pub fn spendable_balance_at(&self, addr: &str, height: u64) -> u64 {
+        let mature = self.mature_balance_at(addr, height) as u128; // confirmed and matured coins
+        let pending = self.pending_spend_of(addr); // coins already promised in the mempool
+        mature.saturating_sub(pending).min(u64::MAX as u128) as u64 // never below zero, always fits u64
+    }
+
     /// Return true if the given txid is already included in any block of
     /// the active chain. This is used by `add_transaction` to reject a
     /// transaction that was already mined, even when the mempool no
@@ -803,6 +826,53 @@ impl Blockchain {
         }
     }
 
+    /// SECURITY FIX: re-check the whole mempool after the tip changed.
+    ///
+    /// A new block consumes nonces and balances. Every pending transaction
+    /// that was mined, whose nonce is now used, or that the sender can no
+    /// longer afford together with its earlier pending transactions can
+    /// never be mined any more, so it is dropped. Valid transactions of every
+    /// sender (also of other users) stay. Without this step the unusable
+    /// entries stayed in the mempool for days and were relayed to peers.
+    pub fn prune_mempool_after_block(&mut self) {
+        let height = self.height(); // same height the mempool admission rule uses
+        let mut by_sender: BTreeMap<String, Vec<Transaction>> = BTreeMap::new(); // pending transactions per sender
+        for tx in self.mempool.iter() {
+            by_sender.entry(tx.from.clone()).or_default().push(tx.clone()); // group a copy by its sender
+        }
+        let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new(); // txids that stay
+        for (sender, mut txs) in by_sender {
+            txs.sort_by_key(|t| t.nonce); // a sender's transactions must be checked in nonce order
+            let mut expected = self.state.nonce_of(&sender); // next nonce the chain accepts from this sender
+            let mut budget = self.mature_balance_at(&sender, height) as u128; // what the sender can still spend
+            for tx in txs {
+                if tx.nonce < expected {
+                    continue; // nonce already used (mined or conflicting): drop only this entry
+                }
+                if tx.nonce != expected {
+                    break; // a nonce gap: this and every later entry can never be mined
+                }
+                let cost = tx.amount as u128 + tx.fee as u128; // amount plus fee leaves the balance
+                if cost > budget {
+                    break; // not affordable: this and every later entry are dropped
+                }
+                budget -= cost; // reserve the coins for this transaction
+                expected = match expected.checked_add(1) {
+                    Some(v) => v, // the next transaction of this sender needs the next nonce
+                    None => break, // nonce space exhausted
+                };
+                keep.insert(tx.txid.clone()); // this transaction can still be mined
+            }
+        }
+        let before = self.mempool.len(); // size before the cleanup, for the log line
+        self.mempool.retain(|t| keep.contains(&t.txid)); // drop everything that is not kept
+        self.mempool_timestamps.retain(|id, _| keep.contains(id)); // keep the arrival-time map in sync
+        let removed = before - self.mempool.len(); // how many entries were dropped
+        if removed > 0 {
+            println!("[mempool] Removed {} unusable transaction(s) after a new block", removed);
+        }
+    }
+
     /// Put back a mempool entry that was taken out for a replace-by-fee
     /// attempt which then failed. (SECURITY FIX: see `add_transaction`.)
     fn restore_replaced(&mut self, replaced: Option<(usize, Transaction, Option<u64>)>) {
@@ -816,20 +886,30 @@ impl Blockchain {
         }
     }
 
+    /// Boolean wrapper kept for the callers that only need accept / reject.
     pub fn add_transaction(&mut self, tx: Transaction) -> bool {
+        self.add_transaction_checked(tx).is_ok()
+    }
+
+    /// Try to put `tx` into the mempool and say WHY when it is refused.
+    pub fn add_transaction_checked(&mut self, tx: Transaction) -> Result<(), String> {
         self.evict_expired_transactions();
 
         // SECURITY FIX: coinbase / genesis transactions must never enter the
         // mempool (validate_transaction treats them as valid special cases).
         if validation::is_special_tx(&tx) {
-            return false;
+            return Err("coinbase and genesis transactions cannot enter the mempool".to_string());
         }
 
         // SECURITY FIX (cheap early reject): a nonce below the account nonce
         // was already used, so the transaction is stale or a replay. This
         // avoids the expensive full-chain scan below for such spam.
         if tx.nonce < self.nonce_of(&tx.from) {
-            return false;
+            return Err(format!(
+                "nonce {} was already used (account nonce is {})",
+                tx.nonce,
+                self.nonce_of(&tx.from)
+            ));
         }
 
         // A transaction that was already mined has a used nonce, so the check
@@ -837,7 +917,7 @@ impl Blockchain {
         // O(chain length) per transaction) was a CPU DoS and is not needed.
 
         if self.mempool.iter().any(|t| t.txid == tx.txid) {
-            return false;
+            return Err("transaction is already in the mempool".to_string());
         }
 
         let rbf_pos = self.mempool.iter().position(|t| t.from == tx.from && t.nonce == tx.nonce);
@@ -875,8 +955,27 @@ impl Blockchain {
                     "[mempool] Rejected RBF attempt: new fee rate {} < required {}",
                     new_fee_rate, min_new_fee_rate
                 );
-                return false;
+                return Err(format!(
+                    "replacement fee rate {} is below the required {}",
+                    new_fee_rate, min_new_fee_rate
+                ));
             }
+        }
+
+        // SECURITY FIX (mempool flooding): one sender may only keep a limited
+        // number of unconfirmed transactions. A replaced entry was already
+        // taken out above, so a replacement never counts twice.
+        let sender_pending = self.mempool.iter().filter(|t| t.from == tx.from).count(); // pending entries of this sender
+        if sender_pending >= MAX_PENDING_TXS_PER_SENDER {
+            println!(
+                "[mempool] Rejected tx {}: {} already has {} unconfirmed transactions",
+                tx.txid, tx.from, sender_pending
+            );
+            self.restore_replaced(replaced); // keep the original entry
+            return Err(format!(
+                "too many unconfirmed transactions for {} (limit {}); wait for a block",
+                tx.from, MAX_PENDING_TXS_PER_SENDER
+            ));
         }
 
         match validation::validate_transaction(self, &tx) {
@@ -887,7 +986,7 @@ impl Blockchain {
                     tx.txid, e.code, e.message
                 );
                 self.restore_replaced(replaced); // the replacement is invalid: keep the original
-                return false;
+                return Err(format!("[{}] {}", e.code, e.message));
             }
         }
 
@@ -901,7 +1000,10 @@ impl Blockchain {
                 tx.txid, fee_rate, current_min_fee, self.mempool_size_bytes()
             );
             self.restore_replaced(replaced); // keep the original entry
-            return false;
+            return Err(format!(
+                "fee rate {} is below the dynamic minimum relay fee {}",
+                fee_rate, current_min_fee
+            ));
         }
 
         if self.mempool.len() >= MEMPOOL_MAX_TXS
@@ -913,14 +1015,14 @@ impl Blockchain {
                     tx.txid, fee_rate
                 );
                 self.restore_replaced(replaced); // keep the original entry
-                return false;
+                return Err("mempool is full and the fee rate is too low to evict a cheaper transaction".to_string());
             }
         }
 
         let now = (crate::utils::now_millis() / 1000) as u64;
         self.mempool_timestamps.insert(tx.txid.clone(), now);
         self.mempool.push(tx);
-        true
+        Ok(())
     }
 
     /// Build the next block from the mempool. Every transaction is
@@ -1148,10 +1250,12 @@ impl Blockchain {
 
         self.connect_block(&new_block)?;
         let nonce = new_block.nonce;
-        self.mempool.clear();
-        self.mempool_timestamps.clear();
         self.chain.push(new_block);
         self.adjust_difficulty();
+        // SECURITY FIX: the whole mempool used to be wiped here, deleting the
+        // still-valid pending transactions of every other user. Only entries
+        // that the new block made unusable are dropped now.
+        self.prune_mempool_after_block();
         Ok(nonce)
     }
 

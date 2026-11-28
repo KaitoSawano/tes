@@ -339,12 +339,19 @@ pub fn rule_sufficient_balance(chain: &Blockchain, tx: &Transaction) -> Result<(
     let need = tx.amount.checked_add(tx.fee).ok_or_else(|| {
         ValidationError::new("E005", "amount + fee overflows u64")
     })?;
-    if balance < need {
+    // SECURITY FIX (mempool overdraft): the balance used to be compared with
+    // this transaction alone. A sender with 0.99 coins could therefore queue
+    // any number of 0.9 coin transactions, because each one looked affordable
+    // on its own although only the first can ever be mined. The coins that the
+    // sender's other pending transactions already commit are counted now.
+    let pending = chain.pending_spend_of(&tx.from); // amount + fee already promised in the mempool
+    let total_need = pending.saturating_add(need as u128); // pending spend plus this transaction
+    if (balance as u128) < total_need {
         return Err(ValidationError::new(
             "E021",
             format!(
-                "insufficient mature balance: required {} ald, available {} ald",
-                need, balance
+                "insufficient mature balance: required {} ald ({} ald already committed by pending transactions), available {} ald",
+                total_need, pending, balance
             ),
         ));
     }
@@ -763,6 +770,16 @@ pub fn validate_transaction(chain: &Blockchain, tx: &Transaction) -> Result<(), 
         return Ok(());
     }
 
+    validate_transaction_stateless(chain, tx)?; // everything that does not depend on pending transactions
+    rule_nonce(chain, tx)?;
+    rule_sufficient_balance(chain, tx)?;
+
+    Ok(())
+}
+
+/// The checks of `validate_transaction` that do not depend on the other
+/// pending transactions of the sender: format, signature and address rules.
+fn validate_transaction_stateless(chain: &Blockchain, tx: &Transaction) -> Result<(), ValidationError> {
     rule_txid_consistent(tx)?;
     rule_output_script_empty(tx)?; // unsigned script data is not allowed
     rule_address_format(&tx.from, chain)?;
@@ -776,8 +793,6 @@ pub fn validate_transaction(chain: &Blockchain, tx: &Transaction) -> Result<(), 
     let pk = resolve_pubkey(tx, next_height, |a| chain.state.get_pubkey(a))?;
     rule_signature_with(tx, &pk)?;
     rule_address_matches_with(tx, &pk)?;
-    rule_nonce(chain, tx)?;
-    rule_sufficient_balance(chain, tx)?;
 
     Ok(())
 }
@@ -1169,10 +1184,48 @@ pub fn validate_chain(chain: &mut Blockchain) -> Result<(), ValidationError> {
 
 pub fn validate_mempool(chain: &Blockchain) -> Vec<ValidationError> {
     let mut errors = Vec::new();
-    for tx in &chain.mempool {
-        if let Err(e) = validate_transaction(chain, tx) {
-            errors.push(e);
+    // FIX: every pending entry used to be checked as if it were a NEW
+    // transaction, which expects the nonce after all pending ones, so every
+    // entry was reported as invalid. The entries are now walked per sender in
+    // nonce order against a running nonce and a running spending budget.
+    let mut ordered: Vec<&Transaction> = chain.mempool.iter().collect(); // all pending entries
+    ordered.sort_by(|a, b| a.from.cmp(&b.from).then_with(|| a.nonce.cmp(&b.nonce))); // sender, then nonce
+    let mut next_nonce: BTreeMap<String, u64> = BTreeMap::new(); // next nonce expected per sender
+    let mut budget: BTreeMap<String, u128> = BTreeMap::new(); // coins each sender can still spend
+    for tx in ordered {
+        if is_special_tx(tx) {
+            continue; // special transactions are never part of the mempool rules
         }
+        if let Err(e) = validate_transaction_stateless(chain, tx) {
+            errors.push(e); // format, signature or address problem
+            continue;
+        }
+        let expected = *next_nonce
+            .entry(tx.from.clone())
+            .or_insert_with(|| chain.nonce_of(&tx.from)); // starts at the account nonce
+        if tx.nonce != expected {
+            errors.push(ValidationError::new(
+                "E022",
+                format!("invalid nonce: got {}, expected {}", tx.nonce, expected),
+            ));
+            continue;
+        }
+        let left = budget
+            .entry(tx.from.clone())
+            .or_insert_with(|| chain.mature_balance_at(&tx.from, chain.height()) as u128); // starts at the mature balance
+        let cost = tx.amount as u128 + tx.fee as u128; // amount plus fee
+        if *left < cost {
+            errors.push(ValidationError::new(
+                "E021",
+                format!(
+                    "insufficient mature balance: required {} ald, still available {} ald",
+                    cost, *left
+                ),
+            ));
+            continue;
+        }
+        *left -= cost; // reserve the coins for this entry
+        next_nonce.insert(tx.from.clone(), expected.saturating_add(1)); // the next entry needs the next nonce
     }
     errors
 }

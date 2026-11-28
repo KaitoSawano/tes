@@ -361,6 +361,11 @@ pub fn load_chain() -> std::io::Result<Blockchain> {
         eprintln!("[node] Reindex complete.");
     }
 
+    // SECURITY FIX: a mempool saved by an older build can still hold overdrawn
+    // or already-mined entries. Now that the state is ready, drop every entry
+    // that can no longer be mined so it is not relayed or mined against.
+    chain.prune_mempool_after_block();
+
     Ok(chain)
 }
 
