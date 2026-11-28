@@ -4,7 +4,7 @@
 
 //! XEPAY library crate.
 
-pub mod base58check;
+pub mod base58;
 pub mod bech32;
 pub mod block;
 pub mod blockchain;

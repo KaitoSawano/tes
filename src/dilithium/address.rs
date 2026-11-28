@@ -6,7 +6,7 @@
 
 use xepay_crypto::sha3_256_hex;
 
-use crate::base58check;
+use crate::base58;
 use crate::bech32;
 use crate::blockchain;
 
@@ -30,11 +30,11 @@ pub fn address_from_public_key(public_key: &[u8]) -> Result<String, String> {
     let mut body = vec![prefix];
     body.extend_from_slice(hash20);
 
-    Ok(base58check::encode(&body))
+    Ok(base58::encode(&body))
 }
 
 pub fn verify_legacy_address(address: &str) -> bool {
-    let payload = match base58check::decode(address) {
+    let payload = match base58::decode(address) {
         Some(p) => p,
         None => return false,
     };
