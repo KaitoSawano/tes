@@ -220,7 +220,14 @@ impl Transaction {
         if self.public_key.is_empty() {
             return None;
         }
-        address::address_from_public_key(&self.public_key).ok()
+        // Derive the same kind of address (bech32 or legacy) as `from`, the
+        // same way validation::rule_address_matches_with does.
+        let hrp = crate::blockchain::bech32_hrp();
+        if self.from.starts_with(&format!("{}1", hrp)) {
+            address::address_from_public_key_bech32(&self.public_key).ok()
+        } else {
+            address::address_from_public_key(&self.public_key).ok()
+        }
     }
 
     pub fn is_valid(&self) -> bool {
