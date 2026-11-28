@@ -82,11 +82,10 @@ pub fn undo_file(height: u64) -> PathBuf {
 pub fn save(undo: &UndoData) -> Result<(), String> {
     datadir::ensure_dirs().map_err(|e| e.to_string())?;
     let path = undo_file(undo.height);
-    let tmp = path.with_extension("bin.tmp");
 
     let encoded = bincode::serialize(undo).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, &encoded).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    // Temporary file + fsync + rename (see datadir::write_atomic).
+    datadir::write_atomic(&path, &encoded, false).map_err(|e| e.to_string())?;
     Ok(())
 }
 

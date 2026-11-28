@@ -222,6 +222,25 @@ pub fn load_chain() -> std::io::Result<Blockchain> {
         )));
     }
 
+    // Structural integrity check of the stored chain: every block must sit at
+    // its own height and link to its predecessor. A gap, a duplicate height
+    // or a broken link means the block data is damaged or incomplete. By
+    // default this is reported loudly; set XEPAY_STRICT_CHAIN=1 to refuse to
+    // start instead.
+    if let Some(problem) = chain_continuity_problem(&blocks) {
+        eprintln!(
+            "[node] WARNING: block store continuity check failed: {}",
+            problem
+        );
+        eprintln!("[node] The stored chain has a gap, a duplicate height or a broken hash link.");
+        if std::env::var("XEPAY_STRICT_CHAIN").is_ok() {
+            return Err(Error::other(format!(
+                "consensus failure: the block store is not a continuous chain: {}",
+                problem
+            )));
+        }
+    }
+
     let mempool = load_mempool().unwrap_or_default();
 
     // Check the reindex mode.
@@ -235,15 +254,9 @@ pub fn load_chain() -> std::io::Result<Blockchain> {
 
     // A corrupt state database is not fatal: it is derived data, so it is
     // wiped and rebuilt from the block store.
-    let state = match crate::storage::StateDB::open(&db_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[node] state db unreadable ({}); recreating", e);
-            let _ = std::fs::remove_dir_all(&db_path);
-            crate::storage::StateDB::open(&db_path)
-                .map_err(|e| Error::other(format!("failed to open state db: {}", e)))?
-        }
-    };
+    // A database that is merely LOCKED by another running node is not
+    // corrupt and is never wiped (see `open_state_db`).
+    let state = open_state_db(&db_path)?;
 
     let mut chain = Blockchain {
         chain: blocks,
@@ -349,6 +362,66 @@ pub fn load_chain() -> std::io::Result<Blockchain> {
     }
 
     Ok(chain)
+}
+
+/// Return a description of the first structural problem in the loaded
+/// chain, or `None` when it is a continuous chain starting at genesis.
+fn chain_continuity_problem(blocks: &[Block]) -> Option<String> {
+    for i in 1..blocks.len() {
+        if blocks[i].index != i as u64 {
+            return Some(format!(
+                "position {} holds a block with height {}",
+                i, blocks[i].index
+            ));
+        }
+        if blocks[i].previous_hash != blocks[i - 1].hash {
+            return Some(format!(
+                "block {} does not link to block {}",
+                i,
+                i - 1
+            ));
+        }
+    }
+    None
+}
+
+/// Open the state database.
+///
+/// If it is locked by another process (for example a second `xepayd` was
+/// started on the same data directory) wait for the lock to be released and
+/// then fail WITHOUT touching the files: wiping a database that another node
+/// is still using would destroy its state. Only a database that is really
+/// unreadable is wiped and rebuilt from the block store (it is derived data).
+fn open_state_db(db_path: &std::path::Path) -> std::io::Result<crate::storage::StateDB> {
+    let mut waited = 0u32;
+    loop {
+        match crate::storage::StateDB::open(db_path) {
+            Ok(s) => return Ok(s),
+            Err(e) if crate::storage::block_index::is_lock_error(&e) => {
+                if waited >= 15 {
+                    return Err(Error::other(format!(
+                        "the state database is locked by another process ({}). \
+                         Is another xepayd already running on this data directory? \
+                         Stop it first with `./xepay stop`.",
+                        e
+                    )));
+                }
+                if waited == 0 {
+                    eprintln!(
+                        "[node] state db is locked by another process; waiting for it to be released..."
+                    );
+                }
+                waited += 1;
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            Err(e) => {
+                eprintln!("[node] state db unreadable ({}); recreating", e);
+                let _ = std::fs::remove_dir_all(db_path);
+                return crate::storage::StateDB::open(db_path)
+                    .map_err(|e| Error::other(format!("failed to open state db: {}", e)));
+            }
+        }
+    }
 }
 
 /// Return true when the on-disk state matches the chain tip.
@@ -570,7 +643,11 @@ pub fn save_state_snapshot(chain: &Blockchain) -> std::io::Result<()> {
     }
 
     let json = serde_json::to_string_pretty(&accounts).map_err(Error::other)?;
-    std::fs::write(datadir::chainstate_dir().join("state_snapshot.json"), json)
+    datadir::write_atomic(
+        &datadir::chainstate_dir().join("state_snapshot.json"),
+        json.as_bytes(),
+        false,
+    )
 }
 
 /// Write all blocks in the chain to the legacy whole-Vec block files.
@@ -680,7 +757,7 @@ pub fn load_blocks() -> std::io::Result<Vec<Block>> {
 
 pub fn save_mempool(mempool: &[crate::transaction::Transaction]) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(mempool).map_err(Error::other)?;
-    std::fs::write(datadir::mempool_path(), json)
+    datadir::write_atomic(&datadir::mempool_path(), json.as_bytes(), false)
 }
 
 pub fn load_mempool() -> std::io::Result<Vec<crate::transaction::Transaction>> {

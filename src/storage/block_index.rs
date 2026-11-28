@@ -26,10 +26,10 @@
 //! treated as Active. This keeps old datadirs loadable for inspection,
 //! but a full reindex is required to populate the new fields.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rusty_leveldb::{LdbIterator, Options, DB as LevelDB};
+use rusty_leveldb::{LdbIterator, Options, WriteBatch, DB as LevelDB};
 
 /// Validation status of a block in the block tree.
 ///
@@ -70,8 +70,19 @@ pub struct BlockIndexEntry {
     pub status: BlockStatus,
 }
 
+/// True when a LevelDB error message says that the database is currently
+/// locked by another opener (another process, or another thread that has
+/// the same directory open). Such an error is transient and must never be
+/// treated as corruption.
+pub fn is_lock_error(msg: &str) -> bool {
+    msg.contains("LockError")
+        || msg.contains("temporarily unavailable")
+        || msg.contains("already held")
+}
+
 pub struct BlockIndex {
     db: Mutex<LevelDB>,
+    path: PathBuf,
 }
 
 impl BlockIndex {
@@ -79,7 +90,10 @@ impl BlockIndex {
         let mut opt = Options::default();
         opt.create_if_missing = true;
         let db = LevelDB::open(path, opt).map_err(|e| format!("{:?}", e))?;
-        Ok(BlockIndex { db: Mutex::new(db) })
+        Ok(BlockIndex {
+            db: Mutex::new(db),
+            path: path.to_path_buf(),
+        })
     }
 
     pub fn contains(&self, hash: &str) -> bool {
@@ -116,8 +130,14 @@ impl BlockIndex {
             return Ok(());
         }
         let value = encode_entry(file_number, offset, height, previous_hash, chainwork, status)?;
-        db.put(hash.as_bytes(), &value)
-            .map_err(|e| format!("{:?}", e))?;
+        // One synced write, followed by an fsync of the LevelDB log, so that
+        // the entry survives a power loss (the block data itself has already
+        // been synced by the block store before this point).
+        let mut batch = WriteBatch::new();
+        batch.put(hash.as_bytes(), &value);
+        db.write(batch, true).map_err(|e| format!("{:?}", e))?;
+        drop(db);
+        crate::datadir::sync_leveldb_dir(&self.path);
         Ok(())
     }
 
@@ -141,8 +161,11 @@ impl BlockIndex {
             entry.chainwork,
             entry.status,
         )?;
-        db.put(hash.as_bytes(), &new_value)
-            .map_err(|e| format!("{:?}", e))?;
+        let mut batch = WriteBatch::new();
+        batch.put(hash.as_bytes(), &new_value);
+        db.write(batch, true).map_err(|e| format!("{:?}", e))?;
+        drop(db);
+        crate::datadir::sync_leveldb_dir(&self.path);
         Ok(())
     }
 

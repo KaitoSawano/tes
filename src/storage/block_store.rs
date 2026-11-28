@@ -14,9 +14,10 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::block::Block;
-use crate::storage::block_index::{BlockIndex, BlockIndexEntry, BlockStatus};
+use crate::storage::block_index::{is_lock_error, BlockIndex, BlockIndexEntry, BlockStatus};
 use crate::consensus::spec;
 
 /// Maximum size of a single block file before rolling over to a new one.
@@ -32,7 +33,23 @@ impl BlockStore {
     pub fn open(blocks_dir: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(blocks_dir).map_err(|e| e.to_string())?;
         let index_path = blocks_dir.join("index");
-        let index = BlockIndex::open(&index_path)?;
+
+        // The index is a LevelDB that only one opener can hold at a time.
+        // Another thread (RPC, P2P) may have it open for a few milliseconds;
+        // wait for it instead of failing, because callers such as
+        // `save_block_only` treat a failure here as "the block could not be
+        // persisted". Real errors are returned immediately.
+        let mut attempts = 0u32;
+        let index = loop {
+            match BlockIndex::open(&index_path) {
+                Ok(i) => break i,
+                Err(e) if is_lock_error(&e) && attempts < 200 => {
+                    attempts += 1;
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(e) => return Err(e),
+            }
+        };
         Ok(BlockStore {
             blocks_dir: blocks_dir.to_path_buf(),
             index,
@@ -139,10 +156,23 @@ impl BlockStore {
 
         let offset = file.metadata().map_err(|e| e.to_string())?.len();
 
-        file.write_all(magic).map_err(|e| e.to_string())?;
-        file.write_all(&size.to_le_bytes()).map_err(|e| e.to_string())?;
-        file.write_all(payload).map_err(|e| e.to_string())?;
+        // Write magic + size + payload as ONE record, so that a crash cannot
+        // leave a header without its body in the middle of the file.
+        let mut record = Vec::with_capacity(8 + payload.len());
+        record.extend_from_slice(magic);
+        record.extend_from_slice(&size.to_le_bytes());
+        record.extend_from_slice(payload);
+        file.write_all(&record).map_err(|e| e.to_string())?;
         file.flush().map_err(|e| e.to_string())?;
+
+        // The block data must be on disk BEFORE the index points to it,
+        // otherwise a power loss could leave an index entry that refers to
+        // data that never reached the disk.
+        file.sync_data().map_err(|e| e.to_string())?;
+        if offset == 0 {
+            // A new block file was created: make its directory entry durable.
+            crate::datadir::sync_dir(&self.blocks_dir);
+        }
 
         Ok((file_number, offset))
     }
@@ -177,6 +207,8 @@ impl BlockStore {
         let mut file = File::open(&path)
             .map_err(|e| format!("failed to open {}: {}", path.display(), e))?;
 
+        let file_len = file.metadata().map_err(|e| e.to_string())?.len();
+
         file.seek(SeekFrom::Start(entry.offset))
             .map_err(|e| e.to_string())?;
 
@@ -187,10 +219,28 @@ impl BlockStore {
         file.read_exact(&mut size_buf).map_err(|e| e.to_string())?;
         let size = u32::from_le_bytes(size_buf) as usize;
 
+        // A corrupt size field must neither trigger a huge allocation nor a
+        // read past the end of the file.
+        let available = file_len.saturating_sub(entry.offset.saturating_add(8));
+        if size as u64 > available {
+            return Err(format!(
+                "block {} is corrupt: record at blk{:05}.dat:{} claims {} bytes but only {} are available",
+                hash, entry.file_number, entry.offset, size, available
+            ));
+        }
+
         let mut payload = vec![0u8; size];
         file.read_exact(&mut payload).map_err(|e| e.to_string())?;
 
         let block: Block = Block::from_bincode(&payload)?;
+
+        // The record must hold exactly the block the index says it holds.
+        if block.hash != hash {
+            return Err(format!(
+                "block store is corrupt: record at blk{:05}.dat:{} holds block {} but the index expects {}",
+                entry.file_number, entry.offset, block.hash, hash
+            ));
+        }
         Ok(Some(block))
     }
 

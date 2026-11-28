@@ -94,6 +94,78 @@ pub fn as_str(p: &Path) -> String {
     p.to_string_lossy().to_string()
 }
 
+/// Best-effort fsync of a directory, so that a rename or a newly created
+/// file inside it survives a power loss. Errors are ignored: some platforms
+/// cannot open a directory for syncing.
+pub fn sync_dir(dir: &Path) {
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+}
+
+/// Best-effort fsync of the write-ahead log and manifest files of a LevelDB
+/// directory. LevelDB's own "sync" write only hands the data to the OS; this
+/// pushes it to the disk. Errors are ignored (the state is recoverable).
+pub fn sync_leveldb_dir(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".log") || name.starts_with("MANIFEST") || name == "CURRENT" {
+                if let Ok(f) = std::fs::File::open(entry.path()) {
+                    let _ = f.sync_all();
+                }
+            }
+        }
+    }
+}
+
+/// Replace `path` with `data` atomically and durably.
+///
+/// The data is written to `<path>.tmp`, synced to disk, and only then
+/// renamed over the target, so a crash or a full disk can never leave a
+/// truncated or half-written file behind: the reader sees either the old
+/// file or the new one. With `private` set the file is created with mode
+/// 0600 (owner only) on Unix, which is required for files holding keys.
+pub fn write_atomic(path: &Path, data: &[u8], private: bool) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut tmp_name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(if private { 0o600 } else { 0o644 });
+        }
+        let mut f = opts.open(&tmp)?;
+        #[cfg(unix)]
+        {
+            // A stale temporary file may already exist with looser permissions.
+            use std::os::unix::fs::PermissionsExt;
+            if private {
+                f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+
+    std::fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent);
+    }
+    Ok(())
+}
+
 pub fn append_debug_log(line: &str) {
     let _guard = LOG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let _ = ensure_dirs();
