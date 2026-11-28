@@ -956,7 +956,7 @@ fn rollback_to_height(chain: &mut Blockchain, target_height: u64) -> Result<(), 
 /// block is missing, and by the manual reindex path. The normal reorg
 /// path uses `rollback_to_height`, which is much faster.
 fn rebuild_state_to_height(chain: &mut Blockchain, target_height: u64) -> Result<(), String> {
-    crate::storage_legacy::rebuild_state_upto(chain, target_height)
+    crate::storage::rebuild_state_upto(chain, target_height)
 }
 
 /// Return true when orphan-related debug logging is enabled. The

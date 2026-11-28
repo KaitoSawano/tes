@@ -16,11 +16,11 @@ SHA3-256 hashing, ML-DSA-65 (post-quantum) signatures and Xephash proof of work.
    - `crypto/src/encryption.rs`: AES-256-GCM and PBKDF2 for the wallet.
    - `src/dilithium/`: ML-DSA-65 keys, signing, verification and address derivation (Base58Check and Bech32).
 
-3. **Storage (`src/storage/`, `src/storage_legacy.rs`)**
+3. **Storage (`src/storage.rs`, `src/storage/`)**
    - `state.rs`: the account state in LevelDB with an in-memory block batch, one atomic synced commit per block, undo data for reorgs, the public key registry and the state root.
    - `trie.rs`: the Merkle Patricia Trie with cached subtree hashes.
    - `block_store.rs`, `block_index.rs`: block files (Bincode, 128 MiB each) and the block index.
-   - `storage_legacy.rs`: loading the chain, crash recovery (`recover_state`), reindex, checkpoint verification.
+   - `storage.rs`: loading the chain, crash recovery (`recover_state`), reindex, checkpoint verification.
 
 4. **P2P (`src/p2p/`)**
    TCP, custom framing, handshake, headers-first sync, side-chain pool and reorganization (`sync.rs`), peer management, anchors, ban manager.
