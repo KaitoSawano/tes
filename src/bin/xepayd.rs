@@ -19,6 +19,12 @@ use xepay::storage;
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Stack size of the thread that owns the runtime and the chain state.
+const NODE_THREAD_STACK_SIZE: usize = 512 * 1024 * 1024;
+
+/// Stack size of the tokio worker / blocking threads.
+const WORKER_THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut selected_network = Network::Main;
@@ -73,11 +79,31 @@ fn main() {
         println!("Use `./xepay stop` to stop the node completely.");
     }
 
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async_main(selected_network, is_daemon_child));
+    // Run the whole node (runtime + chain state) on a dedicated thread with a
+    // large stack. The default main-thread stack (8 MiB) is too small to tear
+    // down the LevelDB in-memory structures (memtable skiplist / LRU cache are
+    // singly linked lists that are dropped recursively), which made the node
+    // abort with "stack overflow" right after "shutdown complete".
+    // The stack is only reserved as virtual memory; pages are committed lazily.
+    let node_thread = std::thread::Builder::new()
+        .name("xepayd-node".to_string())
+        .stack_size(NODE_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(WORKER_THREAD_STACK_SIZE)
+                .build()
+                .expect("failed to build tokio runtime");
+            runtime.block_on(async_main(selected_network, is_daemon_child));
+            // Drop the runtime explicitly while still on the big stack.
+            drop(runtime);
+        })
+        .expect("failed to spawn node thread");
+
+    if node_thread.join().is_err() {
+        eprintln!("[node] FATAL: the node thread panicked");
+        std::process::exit(1);
+    }
 }
 
 async fn async_main(selected_network: Network, is_daemon_child: bool) {
@@ -191,6 +217,16 @@ async fn async_main(selected_network: Network, is_daemon_child: bool) {
     let _ = cmd_tx_for_shutdown.send(NetworkCommand::Shutdown).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), rpc_handle).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Wait (bounded) until the RPC / P2P tasks have released their clones of
+    // the chain, so that the final drop of the chain state (and the LevelDB
+    // handles inside it) happens here on the big-stack node thread and not on
+    // a small-stack RPC handler thread.
+    let release_wait = Instant::now();
+    while Arc::strong_count(&chain) > 1 && release_wait.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop(chain);
 
     println!("[node] shutdown complete");
 }
